@@ -461,6 +461,27 @@ func TestIsRebaseInProgress(t *testing.T) {
 	})
 }
 
+func TestGetMainRepoRootForBareBackedWorktree(t *testing.T) {
+	bareRepo := NewBareTestRepo(t)
+	seedRepo := NewTestRepoWithCommit(t)
+	seedRepo.Run("remote", "add", "origin", bareRepo.Dir)
+	seedRepo.Run("push", "origin", "HEAD:main")
+
+	worktreeDir := t.TempDir()
+	bareRepo.Run("worktree", "add", worktreeDir, "main")
+	t.Cleanup(func() {
+		cmd := exec.Command("git", "-C", bareRepo.Dir, "worktree", "remove", worktreeDir)
+		_ = cmd.Run()
+	})
+
+	got, err := GetMainRepoRoot(worktreeDir)
+	require.NoError(t, err)
+
+	want, err := GetRepoRoot(worktreeDir)
+	require.NoError(t, err)
+	assert.Equal(t, want, got)
+}
+
 func TestGetCommitInfo(t *testing.T) {
 	t.Run("commit with subject only", func(t *testing.T) {
 		repo := NewTestRepoWithAuthor(t, "Test Author")

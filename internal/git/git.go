@@ -609,6 +609,16 @@ func GetMainRepoRoot(path string) (string, error) {
 		// This is a worktree. For regular worktrees, commonDir ends with ".git"
 		// and the main repo is its parent. For submodule worktrees, commonDir
 		// is inside .git/modules/ and we need to read the core.worktree config.
+		//
+		// Some workspace managers create linked worktrees from a bare common
+		// repository (for example, commonDir=/path/to/repo.git). In that layout
+		// there is no main working tree, so the current checkout root is the
+		// stable repo-local path to register and use for config resolution.
+		bareCmd := exec.Command("git", "config", "--file", filepath.Join(commonDir, "config"), "--bool", "core.bare")
+		if out, err := bareCmd.Output(); err == nil && strings.TrimSpace(string(out)) == "true" {
+			return GetRepoRoot(path)
+		}
+
 		if filepath.Base(commonDir) == ".git" {
 			// Regular worktree - parent of .git is the repo root
 			return filepath.Dir(commonDir), nil
