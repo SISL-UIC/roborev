@@ -94,8 +94,8 @@ func TestPanelCountLabelInProgressVsTerminal(t *testing.T) {
 	assert := assert.New(t)
 	running := makeJob(1, withStatus(storage.JobStatusQueued),
 		withSynthesis("R", storage.PanelSummary{MembersTotal: 3, MembersTerminal: 2}))
-	assert.Equal("synthesizing… 2/3 reviewers done", panelStatusCell(running))
+	assert.Equal("synthesizing… 2/3 reviewers done", panelStatusCell(&running))
 	terminal := makeJob(2, withStatus(storage.JobStatusDone),
 		withSynthesis("R", storage.PanelSummary{MembersTotal: 3, MembersTerminal: 3, MembersSucceeded: 2, MembersFailed: 1}))
-	assert.Equal("2 ok · 1 failed", panelStatusCell(terminal))
+	assert.Equal("2 ok · 1 failed", panelStatusCell(&terminal))
 }

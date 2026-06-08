@@ -246,6 +246,19 @@ func queueWindowStart(total, selIdx, visibleRows int) (start, end int) {
 	return start, end
 }
 
+func (m model) queueFullRowCells(r queueRow, hasAnyPanel, treeColor bool) []string {
+	job := *r.job
+	cells := m.jobCells(job)
+	fullRow := make([]string, colCount)
+	fullRow[colSel] = "  "
+	fullRow[colJobID] = fmt.Sprintf("%d", job.ID)
+	copy(fullRow[colRef:], cells)
+	if hasAnyPanel {
+		fullRow[colRef] = decorateRefCell(fullRow[colRef], r, treeColor)
+	}
+	return fullRow
+}
+
 func (m model) renderQueueView() string {
 	var b strings.Builder
 	compact := m.queueCompact()
@@ -374,15 +387,6 @@ func (m model) renderQueueView() string {
 			linesWritten++
 		}
 	} else {
-		// Calculate ID column width based on max ID
-		idWidth := 5 // minimum width (fits "JobID" header)
-		for _, r := range rows {
-			w := len(fmt.Sprintf("%d", r.job.ID))
-			if w > idWidth {
-				idWidth = w
-			}
-		}
-
 		// Determine which jobs to show, keeping selected item visible.
 		start, end = queueWindowStart(len(rows), visibleSelectedIdx, visibleRows)
 
@@ -391,33 +395,19 @@ func (m model) renderQueueView() string {
 
 		// Compute per-column max content widths, using cache when data hasn't changed.
 		allHeaders := [colCount]string{"", "JobID", "Ref", "Branch", "Repo", "Agent", "Queued", "Elapsed", "Status", "P/F", "Closed", "Session", "Req Model", "Req Provider", "Cost"}
-		allFullRows := make([][]string, len(rows))
-		for i := range rows {
-			job := rows[i].job
-			cells := m.jobCells(job)
-			fullRow := make([]string, colCount)
-			fullRow[colSel] = "  "
-			fullRow[colJobID] = fmt.Sprintf("%d", job.ID)
-			copy(fullRow[colRef:], cells)
-			if hasAnyPanel {
-				fullRow[colRef] = decorateRefCell(fullRow[colRef], rows[i], treeColor)
-			}
-			allFullRows[i] = fullRow
-		}
-
 		var contentWidth map[int]int
 		if m.queueColCache.gen == m.queueColGen {
 			contentWidth = m.queueColCache.contentWidths
 		} else {
 			contentWidth = make(map[int]int, len(visCols))
 			for _, c := range visCols {
-				w := lipgloss.Width(allHeaders[c])
-				for _, fullRow := range allFullRows {
-					if cw := lipgloss.Width(fullRow[c]); cw > w {
-						w = cw
-					}
+				contentWidth[c] = lipgloss.Width(allHeaders[c])
+			}
+			for i := range rows {
+				fullRow := m.queueFullRowCells(rows[i], hasAnyPanel, treeColor)
+				for _, c := range visCols {
+					contentWidth[c] = max(contentWidth[c], lipgloss.Width(fullRow[c]))
 				}
-				contentWidth[c] = w
 			}
 			m.queueColCache.gen = m.queueColGen
 			m.queueColCache.contentWidths = contentWidth
@@ -443,7 +433,7 @@ func (m model) renderQueueView() string {
 		// Fixed-width columns: exact sizes (content + padding, not counting inter-column spacing)
 		fixedWidth := map[int]int{
 			colSel:               2,
-			colJobID:             idWidth,
+			colJobID:             max(contentWidth[colJobID], 5),
 			colStatus:            max(contentWidth[colStatus], 6), // "Status" header = 6, auto-sizes to content
 			colQueued:            12,
 			colElapsed:           8,
@@ -561,7 +551,7 @@ func (m model) renderQueueView() string {
 			if start+i == visibleSelectedIdx {
 				sel = "> "
 			}
-			fullRow := allFullRows[start+i]
+			fullRow := m.queueFullRowCells(windowRows[i], hasAnyPanel, treeColor)
 			fullRow[colSel] = sel
 
 			row := make([]string, len(visCols))

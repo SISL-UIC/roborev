@@ -74,8 +74,8 @@ func (m model) contentNavStep(
 		return storage.ReviewJob{}, false, false
 	}
 	for i := idx + dir; i >= 0 && i < len(rows); i += dir {
-		if eligible(rows[i].job) {
-			return rows[i].job, true, true
+		if eligible(*rows[i].job) {
+			return *rows[i].job, true, true
 		}
 	}
 	return storage.ReviewJob{}, false, true

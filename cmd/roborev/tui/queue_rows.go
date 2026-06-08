@@ -12,7 +12,7 @@ import (
 // one level deep: synthesis (parent) rows at depth 0, their member rows at depth
 // 1 when the panel is expanded. Mirrors kata's queue_rows.go:28 queueRow.
 type queueRow struct {
-	job         storage.ReviewJob
+	job         *storage.ReviewJob
 	depth       int  // 0 = parent/standalone, 1 = panel member
 	hasChildren bool // true only for a synthesis parent with >=1 member
 	expanded    bool // parent is expanded (members shown)
@@ -20,7 +20,7 @@ type queueRow struct {
 }
 
 // panelHasChildren reports whether a row is an expandable panel parent.
-func panelHasChildren(j storage.ReviewJob) bool {
+func panelHasChildren(j *storage.ReviewJob) bool {
 	return j.IsSynthesisJob() && j.PanelSummary != nil && j.PanelSummary.MembersTotal > 0
 }
 
@@ -35,7 +35,8 @@ func flattenQueueRows(
 	members map[string][]storage.ReviewJob,
 ) []queueRow {
 	rows := make([]queueRow, 0, len(parents))
-	for _, p := range parents {
+	for i := range parents {
+		p := &parents[i]
 		hasKids := panelHasChildren(p)
 		isOpen := hasKids && expanded[p.PanelRunUUID]
 		rows = append(rows, queueRow{job: p, depth: 0, hasChildren: hasKids, expanded: isOpen})
@@ -46,7 +47,8 @@ func flattenQueueRows(
 		sort.SliceStable(kids, func(i, j int) bool {
 			return kids[i].PanelMemberIndex < kids[j].PanelMemberIndex
 		})
-		for i, k := range kids {
+		for i := range kids {
+			k := &kids[i]
 			rows = append(rows, queueRow{job: k, depth: 1, lastChild: i == len(kids)-1})
 		}
 	}
@@ -104,7 +106,7 @@ func groupBanding(rows []queueRow) []bool {
 
 // panelInProgress reports whether a panel parent is still completing (members
 // running or synthesis not yet terminal).
-func panelInProgress(j storage.ReviewJob) bool {
+func panelInProgress(j *storage.ReviewJob) bool {
 	return j.Status == storage.JobStatusQueued || j.Status == storage.JobStatusRunning
 }
 
@@ -135,7 +137,7 @@ func panelOutcomeSplit(s *storage.PanelSummary) string {
 
 // panelStatusCell is the parent-row panel summary: live progress while running,
 // or a compact outcome split once terminal ("2 ok · 1 failed").
-func panelStatusCell(j storage.ReviewJob) string {
+func panelStatusCell(j *storage.ReviewJob) string {
 	s := j.PanelSummary
 	if s == nil {
 		return ""

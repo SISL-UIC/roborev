@@ -122,7 +122,7 @@ func (m model) handleEnterKey() (tea.Model, tea.Cmd) {
 // gating on panelInProgress (not HasViewableOutput) lets a failed synthesis
 // parent fall through to its error detail instead of a stale "synthesizing".
 func (m model) panelInProgressFlash(job storage.ReviewJob) (model, bool) {
-	if !job.IsSynthesisJob() || !panelInProgress(job) {
+	if !job.IsSynthesisJob() || !panelInProgress(&job) {
 		return m, false
 	}
 	done, total := 0, 0
