@@ -14,6 +14,7 @@ import (
 	acp "github.com/coder/acp-go-sdk"
 
 	"go.kenn.io/roborev/internal/config"
+	"go.kenn.io/roborev/internal/procutil"
 	"go.kenn.io/roborev/internal/version"
 )
 
@@ -199,6 +200,7 @@ func (a *ACPAgent) runPrompt(
 
 	// Build the command with arguments
 	cmd := exec.CommandContext(ctx, a.Command, a.Args...)
+	procutil.HideConsole(cmd)
 
 	// Set up stdio pipes for communication with the agent
 	var stdinPipe io.WriteCloser

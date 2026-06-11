@@ -10,6 +10,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"go.kenn.io/roborev/internal/procutil"
 )
 
 var subprocessWaitDelay = 5 * time.Second
@@ -19,6 +21,7 @@ type subprocessTracker struct {
 }
 
 func configureSubprocess(cmd *exec.Cmd) *subprocessTracker {
+	procutil.HideConsole(cmd)
 	cmd.WaitDelay = subprocessWaitDelay
 
 	// Prevent agents from taking .git/index.lock in the user's repo.

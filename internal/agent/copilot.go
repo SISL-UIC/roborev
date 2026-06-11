@@ -9,6 +9,8 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+
+	"go.kenn.io/roborev/internal/procutil"
 )
 
 var (
@@ -24,6 +26,7 @@ func copilotSupportsAllowAllTools(ctx context.Context, command string) (bool, er
 		return cached.(bool), nil
 	}
 	cmd := exec.CommandContext(ctx, command, "--help")
+	procutil.HideConsole(cmd)
 	output, err := cmd.CombinedOutput()
 	supported := strings.Contains(string(output), "--allow-all-tools")
 	if err != nil && !supported {
@@ -41,6 +44,7 @@ func copilotSupportsStreamOff(ctx context.Context, command string) (bool, error)
 		return cached.(bool), nil
 	}
 	cmd := exec.CommandContext(ctx, command, "--help")
+	procutil.HideConsole(cmd)
 	output, err := cmd.CombinedOutput()
 	supported := strings.Contains(string(output), "--stream")
 	if err != nil && !supported {

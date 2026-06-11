@@ -14,6 +14,8 @@ import (
 	"unicode/utf8"
 
 	acp "github.com/coder/acp-go-sdk"
+
+	"go.kenn.io/roborev/internal/procutil"
 )
 
 type acpTerminal struct {
@@ -345,6 +347,7 @@ func (c *acpClient) CreateTerminal(ctx context.Context, params acp.CreateTermina
 
 	// Build the command with the terminal-specific context
 	cmd := exec.CommandContext(terminalCtx, params.Command, params.Args...)
+	procutil.HideConsole(cmd)
 	cmd.Dir = cwd
 
 	// Set environment variables if specified
