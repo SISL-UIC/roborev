@@ -14,6 +14,8 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
+
+	"go.kenn.io/roborev/internal/procutil"
 )
 
 // CLIClient implements Client by shelling out to the kata CLI.
@@ -43,6 +45,7 @@ func NewCLIClientWithEnv(workdir string, env []string) *CLIClient {
 // ErrUnavailable; a non-zero exit includes stderr.
 func realRun(ctx context.Context, c *CLIClient, args []string, stdin io.Reader) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, c.bin, args...)
+	procutil.HideConsole(cmd)
 	cmd.Dir = c.workdir
 	if len(c.env) > 0 {
 		cmd.Env = append(os.Environ(), c.env...)
