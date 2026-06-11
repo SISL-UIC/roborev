@@ -15,7 +15,24 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"go.kenn.io/roborev/internal/procutil"
 )
+
+// newGitCmd builds a "git" command that does not open a console window on
+// Windows. All git invocations in this package must go through newGitCmd or
+// newGitCmdContext so a detached daemon's git children never flash a console.
+func newGitCmd(args ...string) *exec.Cmd {
+	cmd := exec.Command("git", args...)
+	procutil.HideConsole(cmd)
+	return cmd
+}
+
+func newGitCmdContext(ctx context.Context, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, "git", args...)
+	procutil.HideConsole(cmd)
+	return cmd
+}
 
 // normalizeMSYSPath converts MSYS-style paths (e.g., /c/Users/...) to Windows paths (C:\Users\...).
 // On non-Windows systems, it just applies filepath.FromSlash.
@@ -51,7 +68,7 @@ func GetCommitInfo(repoPath, sha string) (*CommitInfo, error) {
 func GetCommitInfoCtx(ctx context.Context, repoPath, sha string) (*CommitInfo, error) {
 	// Use record separator (ASCII 30) to delimit fields - won't appear in commit messages
 	const rs = "\x1e"
-	cmd := exec.CommandContext(ctx, "git", "log", "-1", "--format=%H"+rs+"%an"+rs+"%s"+rs+"%aI"+rs+"%b", sha)
+	cmd := newGitCmdContext(ctx, "log", "-1", "--format=%H"+rs+"%an"+rs+"%s"+rs+"%aI"+rs+"%b", sha)
 	cmd.Dir = repoPath
 
 	out, err := cmd.Output()
@@ -88,7 +105,7 @@ func GetCommitInfoCtx(ctx context.Context, repoPath, sha string) (*CommitInfo, e
 // rev-parse --abbrev-ref and symbolic-ref --short can return "heads/branch" when the
 // name is ambiguous with another ref (remote tracking branch, tag, etc.).
 func GetCurrentBranch(repoPath string) string {
-	cmd := exec.Command("git", "symbolic-ref", "HEAD")
+	cmd := newGitCmd("symbolic-ref", "HEAD")
 	cmd.Dir = repoPath
 
 	out, err := cmd.Output()
@@ -126,7 +143,7 @@ func IgnorePatternForDir(repoPath, dir string) (pattern string, probe string, er
 // CheckIgnoreNoIndex reports whether path is ignored by git without requiring
 // the path to exist or be tracked in the index.
 func CheckIgnoreNoIndex(repoPath, path string) (bool, error) {
-	cmd := exec.Command("git", "-C", repoPath, "check-ignore", "--quiet", "--no-index", path)
+	cmd := newGitCmd("-C", repoPath, "check-ignore", "--quiet", "--no-index", path)
 	err := cmd.Run()
 	if err == nil {
 		return true, nil
@@ -158,7 +175,7 @@ func HasTrackedFilesUnder(repoPath, path string) (bool, error) {
 	if rel == "." || !filepath.IsLocal(rel) {
 		return false, fmt.Errorf("path must be under the repo root: %s", path)
 	}
-	cmd := exec.Command("git", "-C", repoPath, "ls-files", "--", filepath.ToSlash(rel))
+	cmd := newGitCmd("-C", repoPath, "ls-files", "--", filepath.ToSlash(rel))
 	out, err := cmd.Output()
 	if err != nil {
 		return false, fmt.Errorf("git ls-files: %w", err)
@@ -230,7 +247,7 @@ func ValidateRepoLocalPathNoSymlinks(repoPath, path string) error {
 }
 
 func infoExcludePath(repoPath string) (string, error) {
-	cmd := exec.Command("git", "-C", repoPath, "rev-parse", "--git-path", "info/exclude")
+	cmd := newGitCmd("-C", repoPath, "rev-parse", "--git-path", "info/exclude")
 	out, err := cmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("git rev-parse info/exclude: %w", err)
@@ -370,7 +387,7 @@ func stripRemotePrefix(repoPath, ref string) string {
 
 // refExists reports whether the given fully-qualified ref resolves in the repo.
 func refExists(repoPath, fullRef string) bool {
-	cmd := exec.Command("git", "rev-parse", "--verify", "--quiet", fullRef)
+	cmd := newGitCmd("rev-parse", "--verify", "--quiet", fullRef)
 	cmd.Dir = repoPath
 	return cmd.Run() == nil
 }
@@ -379,7 +396,7 @@ func refExists(repoPath, fullRef string) bool {
 // Uses strings.Fields so CRLF-terminated output on Windows doesn't leave stray
 // "\r" on remote names (which would break prefix matching downstream).
 func listRemotes(repoPath string) ([]string, error) {
-	cmd := exec.Command("git", "remote")
+	cmd := newGitCmd("remote")
 	cmd.Dir = repoPath
 	out, err := cmd.Output()
 	if err != nil {
@@ -404,7 +421,7 @@ func GetDiffCtx(
 	args := []string{"show", sha, "--format=", "--"}
 	args = append(args, ReviewPathspecArgs(extraExcludes...)...)
 
-	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd := newGitCmdContext(ctx, args...)
 	cmd.Dir = repoPath
 
 	out, err := cmd.Output()
@@ -443,7 +460,7 @@ func GetFilesChanged(
 func GetFilesChangedCtx(
 	ctx context.Context, repoPath, sha string,
 ) ([]string, error) {
-	cmd := exec.CommandContext(ctx, "git", "diff-tree", "--no-commit-id", "--name-only", "-r", sha)
+	cmd := newGitCmdContext(ctx, "diff-tree", "--no-commit-id", "--name-only", "-r", sha)
 	cmd.Dir = repoPath
 
 	out, err := cmd.Output()
@@ -464,7 +481,7 @@ func GetFilesChangedCtx(
 
 // GetStat returns the stat summary for a commit
 func GetStat(repoPath, sha string) (string, error) {
-	cmd := exec.Command("git", "show", "--stat", sha, "--format=")
+	cmd := newGitCmd("show", "--stat", sha, "--format=")
 	cmd.Dir = repoPath
 
 	out, err := cmd.Output()
@@ -481,7 +498,7 @@ func GetStat(repoPath, sha string) (string, error) {
 func IsUnbornHead(repoPath string) bool {
 	// Unborn HEAD = symbolic ref exists but the target branch ref doesn't.
 	// Step 1: HEAD must be a symbolic ref (e.g., refs/heads/main)
-	cmd := exec.Command("git", "symbolic-ref", "-q", "HEAD")
+	cmd := newGitCmd("symbolic-ref", "-q", "HEAD")
 	cmd.Dir = repoPath
 	out, err := cmd.Output()
 	if err != nil {
@@ -494,7 +511,7 @@ func IsUnbornHead(repoPath string) bool {
 	// Step 2: "rev-parse --verify <ref>" fails only when the ref doesn't
 	// exist at all (unborn). For corrupt refs (file exists but points to a
 	// missing object), rev-parse still succeeds and returns the raw SHA.
-	cmd = exec.Command("git", "rev-parse", "--verify", ref)
+	cmd = newGitCmd("rev-parse", "--verify", ref)
 	cmd.Dir = repoPath
 	return cmd.Run() != nil
 }
@@ -506,7 +523,7 @@ func ResolveSHA(repoPath, ref string) (string, error) {
 
 // ResolveSHACtx is ResolveSHA with a cancellable context.
 func ResolveSHACtx(ctx context.Context, repoPath, ref string) (string, error) {
-	cmd := exec.CommandContext(ctx, "git", "rev-parse", ref)
+	cmd := newGitCmdContext(ctx, "rev-parse", ref)
 	cmd.Dir = repoPath
 
 	out, err := cmd.Output()
@@ -522,7 +539,7 @@ func ResolveSHACtx(ctx context.Context, repoPath, ref string) (string, error) {
 // Returns (false, nil) if ancestor is not an ancestor (git exits with status 1).
 // Returns (false, error) for git errors (e.g., bad object, repo issues).
 func IsAncestor(repoPath, ancestor, descendant string) (bool, error) {
-	cmd := exec.Command("git", "merge-base", "--is-ancestor", ancestor, descendant)
+	cmd := newGitCmd("merge-base", "--is-ancestor", ancestor, descendant)
 	cmd.Dir = repoPath
 	err := cmd.Run()
 	if err == nil {
@@ -539,7 +556,7 @@ func IsAncestor(repoPath, ancestor, descendant string) (bool, error) {
 
 // GetRepoRoot returns the root directory of the git repository
 func GetRepoRoot(path string) (string, error) {
-	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
+	cmd := newGitCmd("rev-parse", "--show-toplevel")
 	cmd.Dir = path
 
 	out, err := cmd.Output()
@@ -587,7 +604,7 @@ func cleanEvalPath(p string) string {
 // repository, correctly handling worktrees and MSYS-style paths on
 // Windows.
 func ResolveGitDir(repoPath string) (string, error) {
-	cmd := exec.Command("git", "rev-parse", "--git-dir")
+	cmd := newGitCmd("rev-parse", "--git-dir")
 	cmd.Dir = repoPath
 	out, err := cmd.Output()
 	if err != nil {
@@ -608,7 +625,7 @@ func GetMainRepoRoot(path string) (string, error) {
 	// For regular repos: both return ".git" (or absolute path)
 	// For submodules: both return the same path (e.g., "../.git/modules/sub")
 	// For worktrees: --git-dir returns worktree-specific dir, --git-common-dir returns main repo's .git
-	gitDirCmd := exec.Command("git", "rev-parse", "--git-dir")
+	gitDirCmd := newGitCmd("rev-parse", "--git-dir")
 	gitDirCmd.Dir = path
 	gitDirOut, err := gitDirCmd.Output()
 	if err != nil {
@@ -616,7 +633,7 @@ func GetMainRepoRoot(path string) (string, error) {
 	}
 	gitDir := normalizeMSYSPath(string(gitDirOut))
 
-	commonDirCmd := exec.Command("git", "rev-parse", "--git-common-dir")
+	commonDirCmd := newGitCmd("rev-parse", "--git-common-dir")
 	commonDirCmd.Dir = path
 	commonDirOut, err := commonDirCmd.Output()
 	if err != nil {
@@ -645,7 +662,7 @@ func GetMainRepoRoot(path string) (string, error) {
 		// repository (for example, commonDir=/path/to/repo.git). In that layout
 		// there is no main working tree, so the current checkout root is the
 		// stable repo-local path to register and use for config resolution.
-		bareCmd := exec.Command("git", "config", "--file", filepath.Join(commonDir, "config"), "--bool", "core.bare")
+		bareCmd := newGitCmd("config", "--file", filepath.Join(commonDir, "config"), "--bool", "core.bare")
 		if out, err := bareCmd.Output(); err == nil && strings.TrimSpace(string(out)) == "true" {
 			return GetRepoRoot(path)
 		}
@@ -656,7 +673,7 @@ func GetMainRepoRoot(path string) (string, error) {
 		}
 
 		// Submodule worktree - read core.worktree from config
-		cmd := exec.Command("git", "config", "--file", filepath.Join(commonDir, "config"), "core.worktree")
+		cmd := newGitCmd("config", "--file", filepath.Join(commonDir, "config"), "core.worktree")
 		out, err := cmd.Output()
 		if err != nil {
 			return "", fmt.Errorf("git config core.worktree for submodule worktree: %w", err)
@@ -674,7 +691,7 @@ func GetMainRepoRoot(path string) (string, error) {
 
 // ReadFile reads a file at a specific commit
 func ReadFile(repoPath, sha, filePath string) ([]byte, error) {
-	cmd := exec.Command("git", "show", fmt.Sprintf("%s:%s", sha, filePath))
+	cmd := newGitCmd("show", fmt.Sprintf("%s:%s", sha, filePath))
 	cmd.Dir = repoPath
 
 	var stdout, stderr bytes.Buffer
@@ -697,7 +714,7 @@ func GetParentCommits(repoPath, sha string, count int) ([]string, error) {
 // GetParentCommitsCtx is GetParentCommits with a cancellable context.
 func GetParentCommitsCtx(ctx context.Context, repoPath, sha string, count int) ([]string, error) {
 	// Use git log to get parent commits, skipping the commit itself
-	cmd := exec.CommandContext(ctx, "git", "log", "--format=%H", "-n", fmt.Sprintf("%d", count), "--skip=1", sha)
+	cmd := newGitCmdContext(ctx, "log", "--format=%H", "-n", fmt.Sprintf("%d", count), "--skip=1", sha)
 	cmd.Dir = repoPath
 
 	out, err := cmd.Output()
@@ -718,7 +735,7 @@ func GetParentCommitsCtx(ctx context.Context, repoPath, sha string, count int) (
 
 // GetCommitParents returns the direct parent commits for sha.
 func GetCommitParents(repoPath, sha string) ([]string, error) {
-	cmd := exec.Command("git", "show", "-s", "--format=%P", sha)
+	cmd := newGitCmd("show", "-s", "--format=%P", sha)
 	cmd.Dir = repoPath
 
 	out, err := cmd.Output()
@@ -750,7 +767,7 @@ func GetRangeCommits(repoPath, rangeRef string) ([]string, error) {
 
 // GetRangeCommitsCtx is GetRangeCommits with a cancellable context.
 func GetRangeCommitsCtx(ctx context.Context, repoPath, rangeRef string) ([]string, error) {
-	cmd := exec.CommandContext(ctx, "git", "log", "--format=%H", "--reverse", rangeRef)
+	cmd := newGitCmdContext(ctx, "log", "--format=%H", "--reverse", rangeRef)
 	cmd.Dir = repoPath
 
 	out, err := cmd.Output()
@@ -785,7 +802,7 @@ func GetRangeDiffCtx(
 	args := []string{"diff", rangeRef, "--"}
 	args = append(args, ReviewPathspecArgs(extraExcludes...)...)
 
-	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd := newGitCmdContext(ctx, args...)
 	cmd.Dir = repoPath
 
 	out, err := cmd.Output()
@@ -816,7 +833,7 @@ func GetRangeDiffLimitedCtx(
 // HasUncommittedChanges returns true if there are uncommitted changes (staged, unstaged, or untracked files)
 func HasUncommittedChanges(repoPath string) (bool, error) {
 	// Check for staged or unstaged changes to tracked files
-	cmd := exec.Command("git", "status", "--porcelain")
+	cmd := newGitCmd("status", "--porcelain")
 	cmd.Dir = repoPath
 
 	out, err := cmd.Output()
@@ -830,7 +847,7 @@ func HasUncommittedChanges(repoPath string) (bool, error) {
 // GetDirtyFilesChanged returns changed file names for staged, unstaged, and
 // untracked working-tree changes before review diff exclusions are applied.
 func GetDirtyFilesChanged(repoPath string) ([]string, error) {
-	cmd := exec.Command("git", "status", "--porcelain=v1", "-uall")
+	cmd := newGitCmd("status", "--porcelain=v1", "-uall")
 	cmd.Dir = repoPath
 
 	out, err := cmd.Output()
@@ -895,7 +912,7 @@ func GetDirtyDiff(
 	}
 
 	// 1. Get diff of tracked files (staged + unstaged)
-	cmd := exec.Command("git", diffArgs("diff", "HEAD")...)
+	cmd := newGitCmd(diffArgs("diff", "HEAD")...)
 	cmd.Dir = repoPath
 
 	out, err := cmd.Output()
@@ -906,7 +923,7 @@ func GetDirtyDiff(
 		// This covers the edge case where a file is staged but then removed from working tree
 
 		// Get staged changes vs empty tree
-		cmd = exec.Command("git", diffArgs("diff", "--cached", EmptyTreeSHA)...)
+		cmd = newGitCmd(diffArgs("diff", "--cached", EmptyTreeSHA)...)
 		cmd.Dir = repoPath
 		stagedOut, err := cmd.Output()
 		if err != nil {
@@ -917,7 +934,7 @@ func GetDirtyDiff(
 		}
 
 		// Get unstaged changes (working tree vs index)
-		cmd = exec.Command("git", diffArgs("diff")...)
+		cmd = newGitCmd(diffArgs("diff")...)
 		cmd.Dir = repoPath
 		unstagedOut, err := cmd.Output()
 		if err != nil {
@@ -943,7 +960,7 @@ func GetDirtyDiff(
 	// modifying it must stay visible to review).
 	lsArgs = append(lsArgs, ":(exclude,glob)**/.kata.local.toml")
 	lsArgs = append(lsArgs, extra...)
-	cmd = exec.Command("git", lsArgs...)
+	cmd = newGitCmd(lsArgs...)
 	cmd.Dir = repoPath
 
 	untrackedOut, err := cmd.Output()
@@ -1107,7 +1124,7 @@ func captureGitOutputLimited(ctx context.Context, repoPath string, maxBytes int,
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd := newGitCmdContext(ctx, args...)
 	cmd.Dir = repoPath
 
 	stdout, err := cmd.StdoutPipe()
@@ -1212,7 +1229,7 @@ func GetRangeFilesChanged(
 func GetRangeFilesChangedCtx(
 	ctx context.Context, repoPath, rangeRef string,
 ) ([]string, error) {
-	cmd := exec.CommandContext(ctx, "git", "diff", "--name-only", rangeRef)
+	cmd := newGitCmdContext(ctx, "diff", "--name-only", rangeRef)
 	cmd.Dir = repoPath
 
 	out, err := cmd.Output()
@@ -1254,7 +1271,7 @@ func GetRangeStartCtx(ctx context.Context, repoPath, rangeRef string) (string, e
 
 // IsRebaseInProgress returns true if a rebase operation is in progress
 func IsRebaseInProgress(repoPath string) bool {
-	cmd := exec.Command("git", "rev-parse", "--git-dir")
+	cmd := newGitCmd("rev-parse", "--git-dir")
 	cmd.Dir = repoPath
 
 	out, err := cmd.Output()
@@ -1285,7 +1302,7 @@ func GetBranchName(repoPath, sha string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "git", "name-rev", "--name-only", "--refs=refs/heads/*", sha)
+	cmd := newGitCmdContext(ctx, "name-rev", "--name-only", "--refs=refs/heads/*", sha)
 	cmd.Dir = repoPath
 
 	out, err := cmd.Output()
@@ -1320,7 +1337,7 @@ func WorktreePathForBranch(repoPath, branch string) (string, bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "worktree", "list", "--porcelain")
+	cmd := newGitCmdContext(ctx, "-C", repoPath, "worktree", "list", "--porcelain")
 	out, err := cmd.Output()
 	if err != nil {
 		return "", false, fmt.Errorf("git worktree list: %w", err)
@@ -1381,8 +1398,8 @@ func EnsureAbsoluteHooksPath(repoPath string) error {
 	// Read the effective value from any config level
 	// (local, global, system) so we catch relative paths
 	// from ~/.gitconfig too.
-	cmd := exec.Command(
-		"git", "config", "core.hooksPath",
+	cmd := newGitCmd(
+		"config", "core.hooksPath",
 	)
 	cmd.Dir = repoPath
 	out, err := cmd.Output()
@@ -1404,8 +1421,8 @@ func EnsureAbsoluteHooksPath(repoPath string) error {
 		)
 	}
 	abs := filepath.Join(mainRoot, raw)
-	set := exec.Command(
-		"git", "config", "--local", "core.hooksPath", abs,
+	set := newGitCmd(
+		"config", "--local", "core.hooksPath", abs,
 	)
 	set.Dir = repoPath
 	if err := set.Run(); err != nil {
@@ -1442,7 +1459,7 @@ func isGitTildePath(s string) bool {
 // against the main repository root (not the worktree root)
 // so that linked worktrees share the same hooks directory.
 func GetHooksPath(repoPath string) (string, error) {
-	cmd := exec.Command("git", "rev-parse", "--git-path", "hooks")
+	cmd := newGitCmd("rev-parse", "--git-path", "hooks")
 	cmd.Dir = repoPath
 
 	out, err := cmd.Output()
@@ -1515,8 +1532,8 @@ func isHookCausingFailure(repoPath string) bool {
 	if !hasCommitHooks(repoPath) {
 		return false
 	}
-	cmd := exec.Command(
-		"git", "-C", repoPath, "commit",
+	cmd := newGitCmd(
+		"-C", repoPath, "commit",
 		"--dry-run", "--no-verify", "-m", "probe",
 	)
 	return cmd.Run() == nil
@@ -1525,7 +1542,7 @@ func isHookCausingFailure(repoPath string) bool {
 // GetDefaultBranch detects the default branch (from origin/HEAD, or main/master locally)
 func GetDefaultBranch(repoPath string) (string, error) {
 	// Prefer origin/HEAD as the authoritative source for the default branch
-	cmd := exec.Command("git", "symbolic-ref", "refs/remotes/origin/HEAD")
+	cmd := newGitCmd("symbolic-ref", "refs/remotes/origin/HEAD")
 	cmd.Dir = repoPath
 	out, err := cmd.Output()
 	if err == nil {
@@ -1534,13 +1551,13 @@ func GetDefaultBranch(repoPath string) (string, error) {
 		branchName := strings.TrimPrefix(ref, "refs/remotes/origin/")
 		if branchName != "" {
 			// Verify the remote-tracking ref exists before using it
-			checkCmd := exec.Command("git", "rev-parse", "--verify", "--quiet", "refs/remotes/origin/"+branchName)
+			checkCmd := newGitCmd("rev-parse", "--verify", "--quiet", "refs/remotes/origin/"+branchName)
 			checkCmd.Dir = repoPath
 			if checkCmd.Run() == nil {
 				return "origin/" + branchName, nil
 			}
 			// Remote-tracking ref doesn't exist, fall back to local branch
-			checkCmd = exec.Command("git", "rev-parse", "--verify", "--quiet", branchName)
+			checkCmd = newGitCmd("rev-parse", "--verify", "--quiet", branchName)
 			checkCmd.Dir = repoPath
 			if checkCmd.Run() == nil {
 				return branchName, nil
@@ -1550,7 +1567,7 @@ func GetDefaultBranch(repoPath string) (string, error) {
 
 	// Fall back to common local branch names (for repos without origin)
 	for _, branch := range []string{"main", "master"} {
-		cmd := exec.Command("git", "rev-parse", "--verify", "--quiet", branch)
+		cmd := newGitCmd("rev-parse", "--verify", "--quiet", branch)
 		cmd.Dir = repoPath
 		if err := cmd.Run(); err == nil {
 			return branch, nil
@@ -1584,7 +1601,7 @@ func GetUpstream(repoPath, ref string) (string, error) {
 	if ref == "" {
 		ref = "HEAD"
 	}
-	cmd := exec.Command("git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", ref+"@{upstream}")
+	cmd := newGitCmd("rev-parse", "--abbrev-ref", "--symbolic-full-name", ref+"@{upstream}")
 	cmd.Dir = repoPath
 
 	out, err := cmd.Output()
@@ -1789,7 +1806,7 @@ func remoteNameExists(repoPath, remote string) bool {
 
 // readGitConfig returns the value of a git config key, or "" if missing.
 func readGitConfig(repoPath, key string) string {
-	cmd := exec.Command("git", "config", "--get", key)
+	cmd := newGitCmd("config", "--get", key)
 	cmd.Dir = repoPath
 	out, err := cmd.Output()
 	if err != nil {
@@ -1800,7 +1817,7 @@ func readGitConfig(repoPath, key string) string {
 
 // GetMergeBase returns the merge-base (common ancestor) between two refs
 func GetMergeBase(repoPath, ref1, ref2 string) (string, error) {
-	cmd := exec.Command("git", "merge-base", ref1, ref2)
+	cmd := newGitCmd("merge-base", ref1, ref2)
 	cmd.Dir = repoPath
 
 	out, err := cmd.Output()
@@ -1843,7 +1860,7 @@ func (e *CommitError) Unwrap() error {
 // Returns the SHA of the new commit
 func CreateCommit(repoPath, message string) (string, error) {
 	// Stage all changes (respects .gitignore)
-	cmd := exec.Command("git", "add", "-A")
+	cmd := newGitCmd("add", "-A")
 	cmd.Dir = repoPath
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -1854,7 +1871,7 @@ func CreateCommit(repoPath, message string) (string, error) {
 	}
 
 	// Create commit
-	cmd = exec.Command("git", "commit", "-m", message)
+	cmd = newGitCmd("commit", "-m", message)
 	cmd.Dir = repoPath
 	stderr.Reset()
 	cmd.Stderr = &stderr
@@ -1878,7 +1895,7 @@ func CreateCommit(repoPath, message string) (string, error) {
 
 // IsWorkingTreeClean returns true if the working tree has no uncommitted or untracked changes
 func IsWorkingTreeClean(repoPath string) bool {
-	cmd := exec.Command("git", "-C", repoPath, "status", "--porcelain")
+	cmd := newGitCmd("-C", repoPath, "status", "--porcelain")
 	output, err := cmd.Output()
 	if err != nil {
 		return false // Assume dirty if we can't check
@@ -1888,7 +1905,7 @@ func IsWorkingTreeClean(repoPath string) bool {
 
 // CheckoutBranch switches to the given branch in the repository.
 func CheckoutBranch(repoPath, branch string) error {
-	cmd := exec.Command("git", "checkout", branch)
+	cmd := newGitCmd("checkout", branch)
 	cmd.Dir = repoPath
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -1904,12 +1921,12 @@ func CheckoutBranch(repoPath, branch string) error {
 // ResetWorkingTree discards all uncommitted changes (staged and unstaged)
 func ResetWorkingTree(repoPath string) error {
 	// Reset staged changes
-	resetCmd := exec.Command("git", "-C", repoPath, "reset", "--hard", "HEAD")
+	resetCmd := newGitCmd("-C", repoPath, "reset", "--hard", "HEAD")
 	if err := resetCmd.Run(); err != nil {
 		return fmt.Errorf("git reset --hard: %w", err)
 	}
 	// Clean untracked files
-	cleanCmd := exec.Command("git", "-C", repoPath, "clean", "-fd")
+	cleanCmd := newGitCmd("-C", repoPath, "clean", "-fd")
 	if err := cleanCmd.Run(); err != nil {
 		return fmt.Errorf("git clean: %w", err)
 	}
@@ -1933,7 +1950,7 @@ func GetRemoteURL(repoPath, remoteName string) string {
 }
 
 func getRemoteURLByName(repoPath, name string) string {
-	cmd := exec.Command("git", "remote", "get-url", name)
+	cmd := newGitCmd("remote", "get-url", name)
 	cmd.Dir = repoPath
 	out, err := cmd.Output()
 	if err != nil {
@@ -1947,10 +1964,10 @@ func getRemoteURLByName(repoPath, name string) string {
 // change (e.g. before and after a rebase) share the same patch-id.
 // Returns "" for merge commits, empty commits, or on any error.
 func GetPatchID(repoPath, sha string) string {
-	show := exec.Command("git", "-c", "color.ui=false", "show", sha)
+	show := newGitCmd("-c", "color.ui=false", "show", sha)
 	show.Dir = repoPath
 
-	patchID := exec.Command("git", "patch-id", "--stable")
+	patchID := newGitCmd("patch-id", "--stable")
 	patchID.Dir = repoPath
 
 	pipe, err := show.StdoutPipe()
@@ -1986,7 +2003,7 @@ func GetPatchID(repoPath, sha string) string {
 
 func getAnyRemoteURL(repoPath string) string {
 	// List all remotes
-	cmd := exec.Command("git", "remote")
+	cmd := newGitCmd("remote")
 	cmd.Dir = repoPath
 	out, err := cmd.Output()
 	if err != nil {
