@@ -12,6 +12,7 @@ import (
 	gitworktree "go.kenn.io/kit/git/worktree"
 
 	"go.kenn.io/roborev/internal/config"
+	"go.kenn.io/roborev/internal/procutil"
 )
 
 const (
@@ -153,6 +154,7 @@ func removeCIWorktreeDir(worktreeDir string) error {
 
 func pruneGitWorktrees(ctx context.Context, repoPath string) error {
 	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "worktree", "prune")
+	procutil.HideConsole(cmd)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("%w: %s", err, string(out))
 	}

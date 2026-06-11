@@ -22,6 +22,7 @@ import (
 	"go.kenn.io/roborev/internal/config"
 	gitpkg "go.kenn.io/roborev/internal/git"
 	"go.kenn.io/roborev/internal/kata"
+	"go.kenn.io/roborev/internal/procutil"
 )
 
 // HookRunner listens for broadcaster events and runs configured hooks.
@@ -327,6 +328,7 @@ func (hr *HookRunner) runHook(command, workDir string) {
 		// -NoProfile avoids loading user profiles that could slow or alter execution.
 		// -Command takes the rest as a PowerShell script string.
 		cmd = exec.Command("powershell", "-NoProfile", "-Command", command)
+		procutil.HideConsole(cmd)
 	} else {
 		cmd = exec.Command("sh", "-c", command)
 	}

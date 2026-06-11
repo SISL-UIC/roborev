@@ -26,6 +26,7 @@ import (
 	"go.kenn.io/roborev/internal/config"
 	gitpkg "go.kenn.io/roborev/internal/git"
 	ghpkg "go.kenn.io/roborev/internal/github"
+	"go.kenn.io/roborev/internal/procutil"
 	"go.kenn.io/roborev/internal/prompt"
 	reviewpkg "go.kenn.io/roborev/internal/review"
 	"go.kenn.io/roborev/internal/review/autotype"
@@ -1018,6 +1019,7 @@ func (p *CIPoller) buildPanelOpts(ctx context.Context, in buildPanelOptsInput) (
 
 func listCommitsInRange(repoPath, base, head string) ([]string, error) {
 	cmd := exec.Command("git", "rev-list", "--reverse", base+".."+head)
+	procutil.HideConsole(cmd)
 	cmd.Dir = repoPath
 	out, err := cmd.Output()
 	if err != nil {
@@ -1194,6 +1196,7 @@ func isValidGitRepo(path string) bool {
 	cmd := exec.Command(
 		"git", "-C", path, "rev-parse", "--is-inside-work-tree",
 	)
+	procutil.HideConsole(cmd)
 	out, err := cmd.Output()
 	return err == nil && strings.TrimSpace(string(out)) == "true"
 }
@@ -1215,6 +1218,7 @@ func cloneRemoteMatches(path, ghRepo, rawBaseURL string) (bool, error) {
 		"git", "-C", path,
 		"config", "--local", "--get", "remote.origin.url",
 	)
+	procutil.HideConsole(cfgCmd)
 	cfgCmd.Env = append(os.Environ(), "LC_ALL=C")
 	cfgOut, err := cfgCmd.CombinedOutput()
 	if err != nil {
@@ -1250,6 +1254,7 @@ func cloneRemoteMatches(path, ghRepo, rawBaseURL string) (bool, error) {
 	urlCmd := exec.Command(
 		"git", "-C", path, "remote", "get-url", "origin",
 	)
+	procutil.HideConsole(urlCmd)
 	out, err := urlCmd.Output()
 	if err != nil {
 		return false, fmt.Errorf(
@@ -1267,6 +1272,7 @@ func ensureCloneRemoteURL(path, ghRepo, rawBaseURL string) error {
 	}
 
 	cmd := exec.Command("git", "-C", path, "remote", "get-url", "origin")
+	procutil.HideConsole(cmd)
 	out, err := cmd.Output()
 	if err != nil {
 		return fmt.Errorf("get origin URL for %s: %w", path, err)
@@ -1280,6 +1286,7 @@ func ensureCloneRemoteURL(path, ghRepo, rawBaseURL string) error {
 	}
 
 	cmd = exec.Command("git", "-C", path, "remote", "set-url", "origin", want)
+	procutil.HideConsole(cmd)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("set origin URL for %s: %w: %s", path, err, string(out))
 	}
@@ -1352,6 +1359,7 @@ func ghClone(
 		return err
 	}
 	cmd := exec.CommandContext(ctx, "git", "clone", cloneURL, targetPath)
+	procutil.HideConsole(cmd)
 	if env != nil {
 		cmd.Env = env
 	}
@@ -1560,6 +1568,7 @@ func gitFetchCtx(ctx context.Context, repoPath string, env []string) error {
 	unlock := lockGitMetadata(repoPath)
 	defer unlock()
 	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "fetch", "--quiet")
+	procutil.HideConsole(cmd)
 	if env != nil {
 		cmd.Env = env
 	}
@@ -1576,6 +1585,7 @@ func gitFetchPRHead(ctx context.Context, repoPath string, prNumber int, env []st
 	defer unlock()
 	ref := fmt.Sprintf("pull/%d/head", prNumber)
 	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "fetch", "origin", ref, "--quiet")
+	procutil.HideConsole(cmd)
 	if env != nil {
 		cmd.Env = env
 	}

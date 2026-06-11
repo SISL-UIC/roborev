@@ -9,6 +9,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+const createNoWindow = 0x08000000
+
 func TestHiddenCommandNeverFlashesConsoleWindows(t *testing.T) {
 	assert := assert.New(t)
 
