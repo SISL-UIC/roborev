@@ -11,6 +11,8 @@ import (
 	"time"
 
 	googlegithub "github.com/google/go-github/v88/github"
+
+	"go.kenn.io/roborev/internal/procutil"
 )
 
 type ClientOption func(*clientOptions) error
@@ -36,6 +38,7 @@ var ghAuthTokenFn = func(ctx context.Context, hostname string) (string, error) {
 		args = append(args, "--hostname", hostname)
 	}
 	cmd := exec.CommandContext(ctx, "gh", args...)
+	procutil.HideConsole(cmd)
 	out, err := cmd.Output()
 	if err != nil {
 		return "", err
