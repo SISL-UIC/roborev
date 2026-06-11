@@ -5,9 +5,10 @@ package tui
 import (
 	"bytes"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
+
+	"go.kenn.io/roborev/internal/daemon"
 )
 
 // isProcessAlive checks whether a process with the given PID exists
@@ -20,7 +21,7 @@ func isProcessAlive(pid int) bool {
 	tasklistExe := filepath.Join(
 		systemRoot(), "System32", "tasklist.exe",
 	)
-	cmd := exec.Command(
+	cmd := daemon.HiddenCommand(
 		tasklistExe,
 		"/FI", "PID eq "+pidStr,
 		"/FO", "CSV",
