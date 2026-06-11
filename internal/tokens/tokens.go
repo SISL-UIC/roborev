@@ -183,15 +183,18 @@ func fetchForSessionCLI(
 	}, nil
 }
 
+func buildAgentsviewCmd(ctx context.Context, binPath string, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, binPath, args...)
+	procutil.HideConsole(cmd)
+	return cmd
+}
+
 func runAgentsviewCommand(
 	ctx context.Context, timeout time.Duration, binPath string, args ...string,
 ) ([]byte, error) {
 	cmdCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-
-	cmd := exec.CommandContext(cmdCtx, binPath, args...)
-	procutil.HideConsole(cmd)
-	return cmd.Output()
+	return buildAgentsviewCmd(cmdCtx, binPath, args...).Output()
 }
 
 func shouldFallbackToTokenUse(err error) bool {

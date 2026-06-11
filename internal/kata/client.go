@@ -41,9 +41,7 @@ func NewCLIClientWithEnv(workdir string, env []string) *CLIClient {
 	return c
 }
 
-// realRun executes kata and returns stdout. A missing binary becomes
-// ErrUnavailable; a non-zero exit includes stderr.
-func realRun(ctx context.Context, c *CLIClient, args []string, stdin io.Reader) ([]byte, error) {
+func buildKataCmd(ctx context.Context, c *CLIClient, args []string, stdin io.Reader) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, c.bin, args...)
 	procutil.HideConsole(cmd)
 	cmd.Dir = c.workdir
@@ -51,6 +49,13 @@ func realRun(ctx context.Context, c *CLIClient, args []string, stdin io.Reader) 
 		cmd.Env = append(os.Environ(), c.env...)
 	}
 	cmd.Stdin = stdin
+	return cmd
+}
+
+// realRun executes kata and returns stdout. A missing binary becomes
+// ErrUnavailable; a non-zero exit includes stderr.
+func realRun(ctx context.Context, c *CLIClient, args []string, stdin io.Reader) ([]byte, error) {
+	cmd := buildKataCmd(ctx, c, args, stdin)
 
 	verb := "kata"
 	if len(args) > 0 {
