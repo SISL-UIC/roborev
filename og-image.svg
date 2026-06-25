@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" fill="none">
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@700&amp;display=swap');
+    .logo-text {
+      font-family: 'JetBrains Mono', monospace;
+      font-weight: 700;
+      font-size: 72px;
+      fill: #00ff9f;
+      letter-spacing: 0.05em;
+    }
+    .tagline {
+      font-family: 'JetBrains Mono', monospace;
+      font-weight: 400;
+      font-size: 28px;
+      fill: #888888;
+    }
+  </style>
+
+  <!-- Dark background -->
+  <rect width="1200" height="630" fill="#0a0a0a"/>
+
+  <!-- Subtle grid pattern -->
+  <defs>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1a1a1a" stroke-width="1"/>
+    </pattern>
+  </defs>
+  <rect width="1200" height="630" fill="url(#grid)"/>
+
+  <!-- Logo icon (centered, larger) -->
+  <g transform="translate(450, 150) scale(1.8)">
+    <!-- Magnifying glass handle -->
+    <rect x="85" y="85" width="36" height="12" fill="#00ff9f" transform="rotate(45 85 85)"/>
+
+    <!-- Magnifying glass ring -->
+    <circle cx="50" cy="50" r="40" stroke="#00ff9f" stroke-width="6" fill="#0a0a0a"/>
+
+    <!-- Bot head (blocky/retro) -->
+    <rect x="30" y="30" width="40" height="36" fill="#1a1a1a"/>
+
+    <!-- Bot antenna base -->
+    <rect x="47" y="22" width="6" height="10" fill="#00ff9f"/>
+    <rect x="44" y="18" width="12" height="6" fill="#00ff9f"/>
+
+    <!-- Bot eyes - terminal cursor style -->
+    <rect x="36" y="40" width="10" height="10" fill="#00ff9f"/>
+    <rect x="54" y="40" width="10" height="10" fill="#00ff9f"/>
+
+    <!-- Bot mouth - code bracket style -->
+    <text x="50" y="62" font-family="monospace" font-size="14" fill="#00ff9f" text-anchor="middle" font-weight="bold">&gt;_</text>
+  </g>
+
+  <!-- Text -->
+  <text x="600" y="450" class="logo-text" text-anchor="middle">roborev</text>
+  <text x="600" y="510" class="tagline" text-anchor="middle">Continuous code review for coding agents</text>
+</svg>

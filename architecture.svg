@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 740 280" fill="none">
+  <style>
+    .box { fill: #1a1a1a; stroke: #00ff9f; stroke-width: 2; }
+    .box-db { fill: #0d3331; stroke: #00ff9f; stroke-width: 2; }
+    .label { fill: #00ff9f; font-family: 'JetBrains Mono', monospace; font-size: 14px; text-anchor: middle; }
+    .label-sm { fill: #888; font-family: 'JetBrains Mono', monospace; font-size: 11px; text-anchor: middle; }
+    .arrow { stroke: #00ff9f; stroke-width: 2; fill: none; marker-end: url(#arrowhead); }
+    .arrow-down { stroke: #00ff9f; stroke-width: 2; fill: none; marker-end: url(#arrowhead); }
+  </style>
+
+  <defs>
+    <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#00ff9f" />
+    </marker>
+  </defs>
+
+  <!-- CLI Box -->
+  <rect x="20" y="80" width="120" height="60" class="box" />
+  <text x="80" y="115" class="label">CLI</text>
+  <text x="80" y="132" class="label-sm">roborev</text>
+
+  <!-- Arrow 1 -->
+  <path d="M 140 110 L 175 110" class="arrow" />
+
+  <!-- Daemon Box -->
+  <rect x="185" y="80" width="140" height="60" class="box" />
+  <text x="255" y="115" class="label">Daemon</text>
+  <text x="255" y="132" class="label-sm">:7373</text>
+
+  <!-- Arrow 2 -->
+  <path d="M 325 110 L 360 110" class="arrow" />
+
+  <!-- Worker Pool Box -->
+  <rect x="370" y="80" width="140" height="60" class="box" />
+  <text x="440" y="115" class="label">Worker Pool</text>
+  <text x="440" y="132" class="label-sm">4 workers</text>
+
+  <!-- Arrow 3 -->
+  <path d="M 510 110 L 545 110" class="arrow" />
+
+  <!-- Agents Box -->
+  <rect x="555" y="50" width="160" height="120" class="box" />
+  <text x="635" y="85" class="label">Agents</text>
+  <text x="635" y="105" class="label-sm">codex, claude,</text>
+  <text x="635" y="120" class="label-sm">gemini, cursor,</text>
+  <text x="635" y="135" class="label-sm">copilot, ...</text>
+
+  <!-- Arrow down to DB -->
+  <path d="M 255 140 L 255 185" class="arrow-down" />
+
+  <!-- SQLite DB Box (cylinder-ish) -->
+  <rect x="185" y="195" width="140" height="55" rx="4" class="box-db" />
+  <text x="255" y="220" class="label">SQLite</text>
+  <text x="255" y="238" class="label-sm">~/.roborev/reviews.db</text>
+</svg>

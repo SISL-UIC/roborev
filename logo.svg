@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" fill="none">
+  <!-- Magnifying glass handle -->
+  <rect x="85" y="85" width="36" height="12" fill="#00ff9f" transform="rotate(45 85 85)"/>
+
+  <!-- Magnifying glass ring (with dark fill for contrast on light bg) -->
+  <circle cx="50" cy="50" r="40" stroke="#00ff9f" stroke-width="6" fill="#0a0a0a"/>
+
+  <!-- Bot head (blocky/retro) -->
+  <rect x="30" y="30" width="40" height="36" fill="#1a1a1a"/>
+
+  <!-- Bot antenna base -->
+  <rect x="47" y="22" width="6" height="10" fill="#00ff9f"/>
+  <rect x="44" y="18" width="12" height="6" fill="#00ff9f"/>
+
+  <!-- Bot eyes - terminal cursor style -->
+  <rect x="36" y="40" width="10" height="10" fill="#00ff9f"/>
+  <rect x="54" y="40" width="10" height="10" fill="#00ff9f"/>
+
+  <!-- Bot mouth - code bracket style -->
+  <text x="50" y="62" font-family="monospace" font-size="14" fill="#00ff9f" text-anchor="middle" font-weight="bold">&gt;_</text>
+</svg>
