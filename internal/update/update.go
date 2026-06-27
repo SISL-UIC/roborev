@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -26,6 +27,14 @@ const (
 	checksumsAssetName   = "SHA256SUMS"
 	defaultGitHubBaseURL = "https://github.com"
 	maxChecksumsBytes    = 1 << 20
+
+	// dialTimeout bounds how long establishing a TCP connection may take.
+	dialTimeout = 30 * time.Second
+	// idleTimeout aborts a transfer only when no data has been received for
+	// this long, which indicates a dropped connection. Unlike an overall
+	// request deadline it does not penalise slow-but-progressing downloads, so
+	// large release assets keep downloading on slow connections.
+	idleTimeout = 30 * time.Second
 )
 
 type UpdateInfo = selfupdate.Info
@@ -79,7 +88,7 @@ func GetCacheDir() string {
 
 func NewUpdater(deps Deps) *Updater {
 	if deps.Client == nil {
-		deps.Client = &http.Client{Timeout: 30 * time.Second}
+		deps.Client = defaultHTTPClient()
 	}
 	if deps.Now == nil {
 		deps.Now = time.Now
@@ -107,6 +116,46 @@ func NewUpdater(deps Deps) *Updater {
 
 func defaultUpdater() *Updater {
 	return NewUpdater(Deps{})
+}
+
+// defaultHTTPClient builds the client used for update checks and downloads. It
+// deliberately omits http.Client.Timeout (an overall deadline that would abort
+// otherwise-healthy large downloads on slow links) in favour of a per-read
+// idle timeout: the transfer fails only when no data arrives for idleTimeout,
+// signalling a dropped connection.
+func defaultHTTPClient() *http.Client {
+	dialer := &net.Dialer{Timeout: dialTimeout}
+	transport := &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			conn, err := dialer.DialContext(ctx, network, addr)
+			if err != nil {
+				return nil, err
+			}
+			return &idleTimeoutConn{Conn: conn, timeout: idleTimeout}, nil
+		},
+		ForceAttemptHTTP2:     true,
+		TLSHandshakeTimeout:   dialTimeout,
+		ExpectContinueTimeout: time.Second,
+		IdleConnTimeout:       90 * time.Second,
+	}
+	return &http.Client{Transport: transport}
+}
+
+// idleTimeoutConn enforces an idle read timeout by refreshing the read
+// deadline before every Read. A Read fails only if no bytes arrive within
+// timeout, so a transfer that keeps making progress never trips it while a
+// genuinely stalled connection is aborted.
+type idleTimeoutConn struct {
+	net.Conn
+	timeout time.Duration
+}
+
+func (c *idleTimeoutConn) Read(b []byte) (int, error) {
+	if err := c.SetReadDeadline(time.Now().Add(c.timeout)); err != nil {
+		return 0, err
+	}
+	return c.Conn.Read(b)
 }
 
 func (u *Updater) CheckForUpdate(forceCheck bool) (*UpdateInfo, error) {

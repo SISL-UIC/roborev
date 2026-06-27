@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -526,6 +527,63 @@ func writeCachedCheck(t *testing.T, cacheDir, cachedVersion string, checkedAt ti
 	})
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(cacheDir, cacheFileName), data, 0o600))
+}
+
+func TestDefaultHTTPClientUsesIdleTimeoutNotOverallDeadline(t *testing.T) {
+	client := defaultHTTPClient()
+	// An overall http.Client.Timeout aborts large-but-healthy downloads on
+	// slow links (issue #895); the client must rely on the per-read idle
+	// timeout instead.
+	assert.Zero(t, client.Timeout)
+	transport, ok := client.Transport.(*http.Transport)
+	require.True(t, ok)
+	assert.NotNil(t, transport.DialContext)
+}
+
+func TestIdleTimeoutConnAbortsWhenNoDataArrives(t *testing.T) {
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+
+	conn := &idleTimeoutConn{Conn: client, timeout: 50 * time.Millisecond}
+	_, err := conn.Read(make([]byte, 8))
+	require.Error(t, err)
+	var netErr net.Error
+	require.ErrorAs(t, err, &netErr)
+	assert.True(t, netErr.Timeout())
+}
+
+func TestIdleTimeoutConnSucceedsWhileDataKeepsFlowing(t *testing.T) {
+	client, server := net.Pipe()
+	defer client.Close()
+
+	conn := &idleTimeoutConn{Conn: client, timeout: 50 * time.Millisecond}
+
+	// Trickle one byte every 20ms (under the 50ms idle timeout) for a total
+	// span far longer than the idle timeout. A total request deadline would
+	// abort this healthy slow transfer; the idle deadline must not.
+	const chunks = 10
+	go func() {
+		defer server.Close()
+		for i := range chunks {
+			time.Sleep(20 * time.Millisecond)
+			if _, err := server.Write([]byte{byte(i)}); err != nil {
+				return
+			}
+		}
+	}()
+
+	read := 0
+	buf := make([]byte, 1)
+	for {
+		n, err := conn.Read(buf)
+		read += n
+		if err != nil {
+			require.ErrorIs(t, err, io.EOF)
+			break
+		}
+	}
+	assert.Equal(t, chunks, read)
 }
 
 func newHTTPResponse(statusCode int, body string) *http.Response {
