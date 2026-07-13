@@ -211,6 +211,11 @@ func TestSynthesisCompletedPostsOnce(t *testing.T) {
 	assert.Len(*comments, 1, "exactly one PR comment despite duplicate delivery")
 	assert.True(h.panelPostedAt(t, panel.ID), "panel finalized (posted_at set)")
 	assert.NotEmpty(*statuses, "commit status set")
+
+	got, err := h.DB.GetCIPanelByPRSHA("acme/api", 5, "headsha111")
+	require.NoError(t, err)
+	require.NotNil(t, got.Outcome)
+	assert.Equal(storage.PanelOutcomeReviewPosted, *got.Outcome)
 }
 
 // TestSynthesisFailedPostsRawFallback covers F4: when the synthesis agent fails
@@ -234,6 +239,11 @@ func TestSynthesisFailedPostsRawFallback(t *testing.T) {
 		"## roborev: Combined Review", "Member finding X")
 	assert.True(h.panelPostedAt(t, panel.ID), "panel finalized")
 	assert.NotEmpty(*statuses, "commit status set")
+
+	got, err := h.DB.GetCIPanelByPRSHA("acme/api", 6, "headsha222")
+	require.NoError(t, err)
+	require.NotNil(t, got.Outcome)
+	assert.Equal(storage.PanelOutcomeReviewPosted, *got.Outcome)
 }
 
 // TestSynthesisQuotaFailureDefersInsteadOfRawFallback covers the quota-exhausted
@@ -401,6 +411,11 @@ func TestPanelPermanentPostErrorAbandons(t *testing.T) {
 	require.NotNil(t, attempt)
 	assert.Equal("done", attempt.State, "permanent error marks attempt terminal")
 
+	got, err := h.DB.GetCIPanelByPRSHA("acme/api", 8, "headsha444")
+	require.NoError(t, err)
+	require.NotNil(t, got.Outcome)
+	assert.Equal(storage.PanelOutcomeAbandoned, *got.Outcome)
+
 	// posted_at is set, so the CAS (posted_at IS NULL) bars any retry even though
 	// the claim is intentionally left in place.
 	won, err := h.DB.ClaimPanelForPosting(panel.ID, panelPostingStaleWindow)
@@ -439,6 +454,11 @@ func TestPanelPermanentPreflightErrorAbandons(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, attempt)
 	assert.Equal("done", attempt.State, "permanent preflight error marks attempt terminal")
+
+	got, err := h.DB.GetCIPanelByPRSHA("acme/api", 20, headSHA)
+	require.NoError(t, err)
+	require.NotNil(t, got.Outcome)
+	assert.Equal(storage.PanelOutcomeAbandoned, *got.Outcome)
 
 	won, err := h.DB.ClaimPanelForPosting(panel.ID, panelPostingStaleWindow)
 	require.NoError(t, err)
@@ -935,6 +955,11 @@ func TestPostPanelRunGenuineGiveUp(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, attempt)
 	assert.Equal("done", attempt.State, "give-up marks the attempt done")
+
+	got, err := h.DB.GetCIPanelByPRSHA("acme/api", 82, headSHA)
+	require.NoError(t, err)
+	require.NotNil(t, got.Outcome)
+	assert.Equal(storage.PanelOutcomeGiveupPosted, *got.Outcome)
 }
 
 // TestPostPanelRunTransientGiveUp covers the transient give-up: an all-transient
@@ -987,6 +1012,42 @@ func TestPostPanelRunTransientGiveUp(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, attempt)
 	assert.Equal("done", attempt.State, "transient give-up marks the attempt done")
+
+	got, err := h.DB.GetCIPanelByPRSHA("acme/api", 85, headSHA)
+	require.NoError(t, err)
+	require.NotNil(t, got.Outcome)
+	assert.Equal(storage.PanelOutcomeGiveupPosted, *got.Outcome)
+}
+
+// TestPostPanelRunAllSkipPersistsNoReviewOutcome covers the all-skip finalize
+// arm: every member is a timeout skip (classifyPanelOutcome falls through to
+// OutcomeAllSkip), so finalizePanelRun still posts the all-skipped summary but
+// must persist storage.PanelOutcomeNoReviewPosted, not the OutcomePost arm's
+// PanelOutcomeReviewPosted — the two arms only differ in which outcome they
+// pass to postPanelComment, so a regression re-merging them would pass every
+// other test in this file.
+func TestPostPanelRunAllSkipPersistsNoReviewOutcome(t *testing.T) {
+	assert := assert.New(t)
+	h := newCIPollerHarness(t, "https://github.com/acme/api.git")
+	comments := h.CaptureComments()
+	statuses := h.CaptureCommitStatuses()
+
+	timeoutErr := reviewpkg.TimeoutErrorPrefix + "posted early"
+	panel, synth, _ := h.seedCIPanelRun(t, "acme/api", 87, "allskip1234567", "base..allskip1234567",
+		[]jobSpec{{Agent: "test", ReviewType: "review", Status: "canceled", Error: timeoutErr}})
+	h.markJobFailed(t, synth.ID, "synthesis released after all members skipped")
+
+	h.Poller.handleReviewFailed(ciEvent(synth.ID, "review.failed"))
+
+	require.Len(t, *comments, 1, "all-skip still posts the all-skipped summary")
+	assert.Contains((*comments)[0].Body, "## roborev: Combined Review", "all-skipped summary header")
+	assert.NotEmpty(*statuses, "commit status set on all-skip")
+	assert.True(h.panelPostedAt(t, panel.ID), "all-skip finalizes the panel (posted_at set)")
+
+	got, err := h.DB.GetCIPanelByPRSHA("acme/api", 87, "allskip1234567")
+	require.NoError(t, err)
+	require.NotNil(t, got.Outcome)
+	assert.Equal(storage.PanelOutcomeNoReviewPosted, *got.Outcome, "all-skip persists the no-review outcome")
 }
 
 // TestFinalizePanelRunBackfillsMissingAttemptRow covers upgrade-boundary panel

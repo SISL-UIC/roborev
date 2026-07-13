@@ -425,6 +425,94 @@ func TestHumaExportReviewsMaxLimitIsClamped(t *testing.T) {
 	assert.NotNil(t, body.NextCursor)
 }
 
+func TestHumaExportCIMetrics(t *testing.T) {
+	srv, db, _ := newTestServer(t)
+	repo := testutil.CreateTestRepo(t, db)
+
+	// Seed one finalized panel exactly as the storage tests do.
+	created, err := db.ReserveReviewAttempt("o/r", 5, "headsha5",
+		time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC))
+	require.NoError(t, err)
+	require.True(t, created)
+	members := []storage.EnqueueOpts{
+		{RepoID: repo.ID, GitRef: "b..headsha5", Agent: "test", PanelMemberIndex: 0},
+	}
+	synthesis := storage.EnqueueOpts{RepoID: repo.ID, GitRef: "b..headsha5", Agent: "test"}
+	ok, _, _, err := db.CreateCIPanelRun("o/r", 5, "headsha5", members, synthesis)
+	require.NoError(t, err)
+	require.True(t, ok)
+	panel, err := db.GetCIPanelByPRSHA("o/r", 5, "headsha5")
+	require.NoError(t, err)
+	require.NoError(t, db.MarkPanelPosted(panel.ID, storage.PanelOutcomeReviewPosted))
+
+	rr := serveHuma(t, srv, http.MethodGet, "/api/export/ci-metrics", nil)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	var doc ExportCIMetricsDocument
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &doc))
+	assert.Equal(t, 1, doc.SchemaVersion)
+	assert.Equal(t, "roborev", doc.Tool)
+	assert.NotEmpty(t, doc.DatabaseID)
+	assert.Equal(t, "posted_at", doc.Window.Field)
+	require.Len(t, doc.Panels, 1)
+	assert.Equal(t, storage.PanelOutcomeReviewPosted, doc.Panels[0].Outcome)
+
+	// Cursor from a different database → 409.
+	foreign, err := json.Marshal(map[string]any{
+		"version": 1, "database_id": "other",
+		"posted_at": "2026-07-01T00:00:00Z", "panel_id": 1,
+	})
+	require.NoError(t, err)
+	cursor := base64.RawURLEncoding.EncodeToString(foreign)
+	rr = serveHuma(t, srv, http.MethodGet,
+		"/api/export/ci-metrics?cursor="+url.QueryEscape(cursor), nil)
+	assert.Equal(t, http.StatusConflict, rr.Code, rr.Body.String())
+}
+
+func TestHumaExportCIMetricsLegacy(t *testing.T) {
+	srv, db, _ := newTestServer(t)
+	repo := testutil.CreateTestRepo(t, db)
+
+	// Panel activity starting 2026-06-01 bounds the pre-panel era; the
+	// seeded jobs below predate it.
+	_, err := db.Exec(`INSERT INTO ci_pr_panels
+		(github_repo, pr_number, head_sha, panel_run_uuid, created_at)
+		VALUES ('era/marker', 999999, 'sha-era', 'era-uuid', '2026-06-01 00:00:00')`)
+	require.NoError(t, err)
+
+	// Seed one pre-panel pseudopanel: two completed review jobs sharing a
+	// (repo, git_ref), no panel run, no CI tagging (rows from that era
+	// predate it). The legacy export groups them into one unit.
+	for i, agent := range []string{"legacy-agent", "legacy-agent-2"} {
+		job, err := db.EnqueueJob(storage.EnqueueOpts{
+			RepoID: repo.ID, GitRef: "legacy-sha", Agent: agent, Model: "legacy-model",
+		})
+		require.NoError(t, err)
+		_, err = db.Exec(`UPDATE review_jobs
+			SET status = 'done', enqueued_at = ?, started_at = ?, finished_at = ?
+			WHERE id = ?`,
+			"2026-03-01 10:00:00", "2026-03-01 10:00:00",
+			fmt.Sprintf("2026-03-01 10:0%d:00", 5+i), job.ID)
+		require.NoError(t, err)
+	}
+
+	rr := serveHuma(t, srv, http.MethodGet, "/api/export/ci-metrics?legacy=true", nil)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	var doc ExportCIMetricsDocument
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &doc))
+	require.Len(t, doc.Panels, 1)
+	assert.Equal(t, storage.PanelOutcomeLegacyReview, doc.Panels[0].Outcome)
+	assert.Equal(t, repo.Name, doc.Panels[0].GithubRepo)
+	assert.Equal(t, "legacy-sha", doc.Panels[0].HeadSHA)
+	require.Len(t, doc.Panels[0].Jobs, 2)
+	assert.Equal(t, "review", doc.Panels[0].Jobs[0].Role)
+
+	// A non-legacy export must not see the legacy row.
+	rr = serveHuma(t, srv, http.MethodGet, "/api/export/ci-metrics", nil)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &doc))
+	assert.Empty(t, doc.Panels)
+}
+
 func encodeExportCursorForRouteTest(t *testing.T, databaseID, completedAt, reviewID string) string {
 	t.Helper()
 	data, err := json.Marshal(map[string]any{
@@ -695,6 +783,7 @@ func TestHumaOpenAPISpec(t *testing.T) {
 		"/api/jobs":              "get",
 		"/api/review":            "get",
 		"/api/export/reviews":    "get",
+		"/api/export/ci-metrics": "get",
 		"/api/comments":          "get",
 		"/api/repos":             "get",
 		"/api/repos/resolve":     "get",

@@ -114,6 +114,11 @@ CREATE TABLE IF NOT EXISTS ci_pr_panels (
   posting_claimed_at TIMESTAMP,
   posted_at TIMESTAMP,
   retired_at TIMESTAMP,
+  outcome TEXT,
+  first_attempt_at TEXT,
+  attempt_count INTEGER,
+  synthesis_agent TEXT,
+  synthesis_model TEXT,
   UNIQUE(github_repo, pr_number, head_sha)
 );
 
@@ -1002,9 +1007,138 @@ func (db *DB) migrate() error {
 		}
 	}
 
+	// Migration: add terminal-metrics columns to ci_pr_panels if missing.
+	// Written once at finalization so the terminal outcome, retry timing, and
+	// synthesis agent/model survive later attempt-row cleanup and cascade repo
+	// deletion (review_jobs rows for the panel's synthesis job may be gone).
+	for _, col := range []struct{ name, ddl string }{
+		{"outcome", `ALTER TABLE ci_pr_panels ADD COLUMN outcome TEXT`},
+		{"first_attempt_at", `ALTER TABLE ci_pr_panels ADD COLUMN first_attempt_at TEXT`},
+		{"attempt_count", `ALTER TABLE ci_pr_panels ADD COLUMN attempt_count INTEGER`},
+		{"synthesis_agent", `ALTER TABLE ci_pr_panels ADD COLUMN synthesis_agent TEXT`},
+		{"synthesis_model", `ALTER TABLE ci_pr_panels ADD COLUMN synthesis_model TEXT`},
+	} {
+		err = db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('ci_pr_panels') WHERE name = ?`, col.name).Scan(&count)
+		if err != nil {
+			return fmt.Errorf("check %s column: %w", col.name, err)
+		}
+		if count == 0 {
+			if _, err = db.Exec(col.ddl); err != nil {
+				return fmt.Errorf("add %s column: %w", col.name, err)
+			}
+		}
+	}
+
 	// Run sync-related migrations
 	if err := db.migrateSyncColumns(); err != nil {
 		return err
+	}
+
+	// Backfill terminal metrics for panels finalized before the terminal-
+	// metrics columns existed. Runs after migrateSyncColumns because it
+	// reads review_jobs.panel_run_uuid/panel_role, which that migration
+	// adds.
+	//
+	// Outcome is reconstructed from the retained jobs, mirroring the live
+	// posting decision (classifyPanelOutcome) in precedence order:
+	//
+	//  1. A synthesis job that FAILED transiently (a provider outage or a
+	//     quota/session exhaustion) took precedence over member output in
+	//     the live path: the run deferred rather than post the degraded raw
+	//     fallback, and a posted row in that state is the terminal give-up
+	//     after the transient retry wall exhausted -> 'giveup_posted'. The
+	//     transient/quota distinction is an error-prefix match, matching
+	//     review.IsTransientFailure / IsQuotaFailure (OutageErrorPrefix
+	//     "outage: ", QuotaErrorPrefix "quota: "); storage cannot import
+	//     review (review imports storage), so the prefixes are inlined and
+	//     must track those constants. A GENUINE (deterministic) synthesis
+	//     failure is deliberately NOT caught here: it still posted the raw
+	//     member fallback, so it falls through to rule 2.
+	//  2. A member with retained non-empty review output means the review
+	//     (or the raw fallback) was posted -> 'review_posted'.
+	//  3. Otherwise a failed member means the give-up note was posted ->
+	//     'giveup_posted'.
+	//  4. Otherwise the all-skip notice was posted -> 'no_review_posted'.
+	//
+	// Runs abandoned on a permanent posting failure are indistinguishable
+	// (posting state was not persisted then) and stay approximate. Rows
+	// with no surviving member rows keep NULL and export as "unknown".
+	if _, err = db.Exec(`UPDATE ci_pr_panels SET outcome =
+		CASE
+			WHEN EXISTS (SELECT 1 FROM review_jobs sj
+			             WHERE sj.id = ci_pr_panels.synthesis_job_id
+			               AND sj.status = 'failed'
+			               AND (sj.error LIKE 'outage: %' OR sj.error LIKE 'quota: %'))
+			     THEN 'giveup_posted'
+			WHEN EXISTS (SELECT 1 FROM review_jobs j
+			             JOIN reviews rv ON rv.job_id = j.id
+			             WHERE j.panel_run_uuid = ci_pr_panels.panel_run_uuid
+			               AND j.panel_role = 'member' AND j.status = 'done'
+			               AND TRIM(rv.output) != '') THEN 'review_posted'
+			WHEN EXISTS (SELECT 1 FROM review_jobs j
+			             WHERE j.panel_run_uuid = ci_pr_panels.panel_run_uuid
+			               AND j.panel_role = 'member'
+			               AND j.status = 'failed') THEN 'giveup_posted'
+			ELSE 'no_review_posted'
+		END
+		WHERE posted_at IS NOT NULL AND outcome IS NULL
+		  AND panel_run_uuid != ''
+		  AND EXISTS (SELECT 1 FROM review_jobs j
+		              WHERE j.panel_run_uuid = ci_pr_panels.panel_run_uuid
+		                AND j.panel_role = 'member')`); err != nil {
+		return fmt.Errorf("backfill ci_pr_panels outcome: %w", err)
+	}
+	// first_attempt_at/attempt_count prefer the surviving
+	// ci_pr_review_attempts row — the exact source MarkPanelPosted
+	// snapshots at finalization — so deferred retries before the executed
+	// run are counted. Only when closed-PR cleanup already deleted the
+	// attempt row does first_attempt_at fall back to the final run's
+	// earliest job enqueue (a floor that undercounts throttled PRs), with
+	// attempt_count left NULL as unrecoverable. Both statements only touch
+	// rows the finalizer never wrote, so re-runs are no-ops.
+	if _, err = db.Exec(`UPDATE ci_pr_panels SET
+		first_attempt_at = COALESCE(
+			(SELECT a.first_attempt_at FROM ci_pr_review_attempts a
+			 WHERE a.github_repo = ci_pr_panels.github_repo
+			   AND a.pr_number = ci_pr_panels.pr_number
+			   AND a.head_sha = ci_pr_panels.head_sha),
+			(SELECT MIN(strftime('%Y-%m-%dT%H:%M:%SZ', j.enqueued_at))
+			 FROM review_jobs j WHERE j.panel_run_uuid = ci_pr_panels.panel_run_uuid)),
+		attempt_count =
+			(SELECT a.attempt FROM ci_pr_review_attempts a
+			 WHERE a.github_repo = ci_pr_panels.github_repo
+			   AND a.pr_number = ci_pr_panels.pr_number
+			   AND a.head_sha = ci_pr_panels.head_sha)
+		WHERE posted_at IS NOT NULL AND first_attempt_at IS NULL
+		  AND (EXISTS (SELECT 1 FROM ci_pr_review_attempts a
+		               WHERE a.github_repo = ci_pr_panels.github_repo
+		                 AND a.pr_number = ci_pr_panels.pr_number
+		                 AND a.head_sha = ci_pr_panels.head_sha)
+		       OR (panel_run_uuid != ''
+		           AND EXISTS (SELECT 1 FROM review_jobs j
+		                       WHERE j.panel_run_uuid = ci_pr_panels.panel_run_uuid
+		                         AND j.enqueued_at IS NOT NULL)))`); err != nil {
+		return fmt.Errorf("backfill ci_pr_panels first_attempt_at: %w", err)
+	}
+	// Snapshot synthesis_agent/synthesis_model from the synthesis job for
+	// panels finalized before these columns existed, exactly as
+	// MarkPanelPosted now does at finalization. Without this the export
+	// falls back to the live review_jobs join, so a later cascade repo
+	// deletion (which deletes the synthesis job) permanently loses the
+	// model attribution for these historical rows. Only rows whose
+	// synthesis job still exists can be recovered; the pair is written
+	// together and guarded on synthesis_agent IS NULL, so re-runs and rows
+	// already snapshotted by the finalizer are untouched.
+	if _, err = db.Exec(`UPDATE ci_pr_panels SET
+		synthesis_agent = (SELECT j.agent FROM review_jobs j
+		                   WHERE j.id = ci_pr_panels.synthesis_job_id),
+		synthesis_model = (SELECT j.model FROM review_jobs j
+		                   WHERE j.id = ci_pr_panels.synthesis_job_id)
+		WHERE posted_at IS NOT NULL AND synthesis_agent IS NULL
+		  AND synthesis_job_id IS NOT NULL
+		  AND EXISTS (SELECT 1 FROM review_jobs j
+		              WHERE j.id = ci_pr_panels.synthesis_job_id)`); err != nil {
+		return fmt.Errorf("backfill ci_pr_panels synthesis snapshot: %w", err)
 	}
 
 	// Auto design review support: extends status CHECK constraint,

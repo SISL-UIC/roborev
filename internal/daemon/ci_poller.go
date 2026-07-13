@@ -1845,8 +1845,12 @@ func (p *CIPoller) finalizePanelRun(row *storage.CIPanel, members []storage.Batc
 
 	out := classifyPanelOutcome(results, p.synthesisFailureResult(row), consecutiveGenuine)
 	switch out.Kind {
-	case OutcomePost, OutcomeAllSkip:
-		p.postPanelComment(row, members)
+	case OutcomePost:
+		p.postPanelComment(row, members, storage.PanelOutcomeReviewPosted)
+	case OutcomeAllSkip:
+		// The all-skipped summary is a posted comment but not a review;
+		// terminal metrics must not count it as one.
+		p.postPanelComment(row, members, storage.PanelOutcomeNoReviewPosted)
 	case OutcomeGenuineGiveUp:
 		p.postPanelGiveUp(row,
 			reviewpkg.FormatGenuineSoftNoteComment(row.HeadSHA, out.LastErrorExcerpt),
@@ -1909,10 +1913,11 @@ func (p *CIPoller) ensureReviewAttempt(row *storage.CIPanel) (*storage.ReviewAtt
 }
 
 // postPanelComment posts the combined/synthesis comment (or the all-skipped
-// summary, both via panelCommentBody), sets the commit status, marks the
-// attempt done, and finalizes the panel row. This is the pre-existing posting
-// path, now invoked only for OutcomePost/OutcomeAllSkip.
-func (p *CIPoller) postPanelComment(row *storage.CIPanel, members []storage.BatchReviewResult) {
+// summary, both via panelCommentBody), sets the commit status, and finalizes
+// the panel row (which also marks the attempt done, in the same transaction).
+// This is the pre-existing posting path, now invoked only for
+// OutcomePost/OutcomeAllSkip.
+func (p *CIPoller) postPanelComment(row *storage.CIPanel, members []storage.BatchReviewResult, outcome string) {
 	body := p.panelCommentBody(row, members)
 	if err := p.callPostPRComment(row.GithubRepo, row.PRNumber, body); err != nil {
 		p.handlePanelPostError(row, err)
@@ -1925,19 +1930,18 @@ func (p *CIPoller) postPanelComment(row *storage.CIPanel, members []storage.Batc
 		log.Printf("CI poller: failed to set %s status for %s@%s: %v",
 			state, row.GithubRepo, row.HeadSHA, err)
 	}
-	p.markAttemptDone(row)
-	if err := p.db.MarkPanelPosted(row.ID); err != nil {
+	if err := p.db.MarkPanelPosted(row.ID, outcome); err != nil {
 		log.Printf("CI poller: warning: failed to finalize panel %d: %v", row.ID, err)
 	}
 	log.Printf("CI poller: posted panel comment on %s#%d (panel %d, %d members)",
 		row.GithubRepo, row.PRNumber, row.ID, len(members))
 }
 
-// postPanelGiveUp posts a give-up note, sets the requested commit status, marks
-// the attempt done, and finalizes the panel row. Transient/provider-unavailable
-// give-up remains non-blocking; deterministic genuine give-up is blocking. A
-// comment-post failure routes through the same permanent/transient handling as a
-// normal post.
+// postPanelGiveUp posts a give-up note, sets the requested commit status, and
+// finalizes the panel row (which also marks the attempt done, in the same
+// transaction). Transient/provider-unavailable give-up remains non-blocking;
+// deterministic genuine give-up is blocking. A comment-post failure routes
+// through the same permanent/transient handling as a normal post.
 func (p *CIPoller) postPanelGiveUp(row *storage.CIPanel, body, statusState, statusDesc string) {
 	if err := p.callPostPRComment(row.GithubRepo, row.PRNumber, body); err != nil {
 		p.handlePanelPostError(row, err)
@@ -1947,8 +1951,7 @@ func (p *CIPoller) postPanelGiveUp(row *storage.CIPanel, body, statusState, stat
 		log.Printf("CI poller: failed to set give-up status for %s@%s: %v",
 			row.GithubRepo, gitpkg.ShortSHA(row.HeadSHA), err)
 	}
-	p.markAttemptDone(row)
-	if err := p.db.MarkPanelPosted(row.ID); err != nil {
+	if err := p.db.MarkPanelPosted(row.ID, storage.PanelOutcomeGiveupPosted); err != nil {
 		log.Printf("CI poller: warning: failed to finalize give-up panel %d: %v", row.ID, err)
 	}
 	log.Printf("CI poller: posted give-up note on %s#%d (panel %d)",
@@ -2006,16 +2009,6 @@ func (p *CIPoller) recordDeferral(
 		attempt.Attempt, nextAt.Format(time.RFC3339), logExcerpt(excerpt))
 }
 
-// markAttemptDone marks the HEAD's attempt terminal. finalizePanelRun guarantees
-// a reserved attempt row before any path that reaches here, so the row always
-// exists.
-func (p *CIPoller) markAttemptDone(row *storage.CIPanel) {
-	if err := p.db.MarkReviewAttemptDone(row.GithubRepo, row.PRNumber, row.HeadSHA); err != nil {
-		log.Printf("CI poller: error marking review attempt done for %s#%d@%s: %v",
-			row.GithubRepo, row.PRNumber, gitpkg.ShortSHA(row.HeadSHA), err)
-	}
-}
-
 // panelCommentBody picks the PR comment body from the synthesis job status,
 // applying the F11 wrapper rule. Synthesis done -> the persisted review (wrapped
 // with a verdict header only when it lacks a `## roborev:` one, but always with
@@ -2068,10 +2061,9 @@ func (p *CIPoller) abandonPanelPost(row *storage.CIPanel, statusDesc, reason str
 		log.Printf("CI poller: failed to set error status for %s@%s: %v",
 			row.GithubRepo, row.HeadSHA, statusErr)
 	}
-	p.markAttemptDone(row)
 	log.Printf("CI poller: abandoning panel %d for %s %s#%d",
 		row.ID, reason, row.GithubRepo, row.PRNumber)
-	if err := p.db.MarkPanelPosted(row.ID); err != nil {
+	if err := p.db.MarkPanelPosted(row.ID, storage.PanelOutcomeAbandoned); err != nil {
 		log.Printf("CI poller: error finalizing abandoned panel %d: %v", row.ID, err)
 	}
 }
