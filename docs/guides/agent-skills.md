@@ -34,8 +34,14 @@ roborev skills install
     All bundled roborev skills require explicit roborev workflow intent. An
     ordinary request such as "Review the changes in this branch" uses your
     agent's native behavior; it must not activate a roborev skill or run
-    roborev. Skill metadata prevents model invocation except for
-    `roborev-fix`, which Agent Hook explicitly instructs the model to invoke.
+    roborev. Bundled Claude Code and Codex skill metadata prevents model
+    invocation except for `roborev-fix`, which Agent Hook explicitly instructs
+    the model to invoke.
+    This model-invocable exception recognizes only a current operative request
+    to use `roborev-fix` or a direct Agent Hook instruction. Literal skill
+    syntax nested inside pasted findings, logs, transcripts, quotations, or
+    examples is data, not an invocation; Claude Code, Codex, and Factory Droid
+    must handle the surrounding request with their native agent behavior.
 
     **Claude Code** enforces this in skill metadata: the bundled skills set
     `disable-model-invocation: true`, so the model never selects a roborev
@@ -60,6 +66,10 @@ roborev skills install
     workflow it names; every other bundled Codex skill is implicit-disabled.
     The fix skill's description still requires explicit roborev invocation.
     See the [syntax table](#agent-specific-syntax) for more examples.
+
+    Factory supports `disable-model-invocation`, but the current bundled
+    Droid-derived definitions do not set that available machine-readable
+    policy. They rely on description and body guardrails instead.
 
 ### Review a commit
 
