@@ -106,6 +106,13 @@ type CIPoller struct {
 	discordQuotaDedupe map[string]time.Time
 	discordNowFn       func() time.Time
 
+	// nowFn is the clock for throttle decisions (test seam).
+	nowFn func() time.Time
+
+	// quietHours is the window resolved once per poll cycle by poll(),
+	// owned by the single poll goroutine.
+	quietHours *config.QuietHoursWindow
+
 	subID      int // broadcaster subscription ID for event listening
 	stopCh     chan struct{}
 	doneCh     chan struct{}
@@ -124,6 +131,7 @@ func NewCIPoller(db *storage.DB, cfgGetter ConfigGetter, broadcaster Broadcaster
 		broadcaster:        broadcaster,
 		discordQuotaDedupe: make(map[string]time.Time),
 		discordNowFn:       time.Now,
+		nowFn:              time.Now,
 	}
 	p.listOpenPRsFn = p.listOpenPRs
 	p.listTrustedActorsFn = p.listTrustedActors
@@ -282,6 +290,10 @@ func (p *CIPoller) run(ctx context.Context, stopCh, doneCh chan struct{}, interv
 func (p *CIPoller) poll(ctx context.Context) {
 	cfg := p.cfgGetter.Config()
 
+	// Resolve quiet hours once per cycle so an invalid config logs one
+	// warning per poll, not one per PR.
+	p.quietHours = resolveQuietHours(&cfg.CI)
+
 	repos, err := p.repoResolver.Resolve(ctx, &cfg.CI, func(owner string) string {
 		return p.githubTokenForRepo(owner + "/_") // githubTokenForRepo only uses the owner part
 	})
@@ -359,12 +371,30 @@ func (p *CIPoller) processPR(ctx context.Context, ghRepo string, pr ghPR, cfg *c
 	}
 
 	// Throttle: skip if this PR was reviewed recently (any SHA).
-	throttled, err := p.throttlePR(ghRepo, pr, cfg)
+	dec, err := p.throttlePR(ghRepo, pr, cfg)
 	if err != nil {
 		return err
 	}
-	if throttled {
-		p.supersedePriorPanels(ghRepo, pr.Number, pr.HeadRefOid)
+	if dec.throttled {
+		// A quiet-hours-only deferral keeps the in-flight panel running:
+		// quiet hours exists to space reviews out during frequent overnight
+		// pushes, and superseding on every push could cancel each panel
+		// before it completes, producing no reviews at all. The retained
+		// panel is flagged so guardPanelPostTarget lets its snapshot review
+		// post even though the PR HEAD has advanced; the next enqueue
+		// supersedes it if it is somehow still active. Marking happens
+		// BEFORE the deferred-status publication below: that status is a
+		// synchronous GitHub call, and a panel completing during it would
+		// be atomically retired while still unflagged. A push landing after
+		// the panel completes but before this poll can still be retired as
+		// stale-head — an accepted poll-latency race; the next interval's
+		// panel covers it.
+		if dec.quietOnly {
+			p.markPanelsForStalePost(ghRepo, pr)
+		} else {
+			p.supersedePriorPanels(ghRepo, pr.Number, pr.HeadRefOid)
+		}
+		p.postDeferredStatus(ghRepo, pr, dec.nextEligible)
 		return nil
 	}
 
@@ -535,28 +565,92 @@ func (p *CIPoller) alreadyReviewedPR(ghRepo string, pr ghPR) (bool, error) {
 	return false, nil
 }
 
+// markPanelsForStalePost flags a PR's still-active panel runs to post despite
+// a HEAD advance. Best-effort: on error the panel keeps running and may be
+// retired as stale-head at posting time.
+func (p *CIPoller) markPanelsForStalePost(ghRepo string, pr ghPR) {
+	marked, err := p.db.MarkPanelsAllowStalePost(ghRepo, pr.Number, pr.HeadRefOid)
+	if err != nil {
+		log.Printf("CI poller: error marking panels for stale post for %s#%d: %v",
+			ghRepo, pr.Number, err)
+		return
+	}
+	if marked > 0 {
+		log.Printf("CI poller: quiet hours retained %d in-flight panel run(s) for %s#%d (new HEAD %s)",
+			marked, ghRepo, pr.Number, gitpkg.ShortSHA(pr.HeadRefOid))
+	}
+}
+
+// resolveQuietHours parses the [ci.quiet_hours] config, logging a warning
+// and disabling the feature when it is invalid (a typo must not throttle
+// harder than configured).
+func resolveQuietHours(ci *config.CIConfig) *config.QuietHoursWindow {
+	w, err := ci.QuietHours.Resolve()
+	if err != nil {
+		log.Printf("CI poller: invalid [ci.quiet_hours] config, quiet hours disabled: %v", err)
+		return nil
+	}
+	return w
+}
+
+// throttleDecision is throttlePR's verdict on a push. quietOnly reports that
+// quiet hours alone drove the deferral (the base rules would have allowed the
+// review); the caller uses it to keep the in-flight panel instead of
+// superseding it. nextEligible is when the PR can next be reviewed, for the
+// deferred commit status.
+type throttleDecision struct {
+	throttled    bool
+	quietOnly    bool
+	nextEligible time.Time
+}
+
 // throttlePR reports whether the PR was reviewed recently enough to defer this
-// push. Bypass users are never throttled. When throttled it sets a "pending"
-// deferred commit status and returns true. The throttle is purely time-based on
-// the most recent panel run for the PR (any HEAD SHA).
-func (p *CIPoller) throttlePR(ghRepo string, pr ghPR, cfg *config.Config) (bool, error) {
-	throttle := cfg.CI.ResolvedThrottleInterval()
-	if throttle <= 0 || cfg.CI.IsThrottleBypassed(pr.Author.Login) {
-		return false, nil
+// push. Bypass users skip the base throttle interval, but the quiet-hours
+// interval applies to everyone while the window is active. The throttle is
+// purely time-based on the most recent panel run for the PR (any HEAD SHA).
+// Pure decision, no side effects: the caller publishes the deferred status
+// via postDeferredStatus after its retention/supersede bookkeeping.
+func (p *CIPoller) throttlePR(ghRepo string, pr ghPR, cfg *config.Config) (throttleDecision, error) {
+	base := cfg.CI.ResolvedThrottleInterval()
+	if cfg.CI.IsThrottleBypassed(pr.Author.Login) {
+		base = 0
+	}
+	throttle := base
+	if q := p.quietHours; q != nil && q.Active(p.nowFn()) && q.Interval > throttle {
+		throttle = q.Interval
+	}
+	if throttle <= 0 {
+		return throttleDecision{}, nil
 	}
 	lastReview, err := p.db.LatestPanelTimeForPR(ghRepo, pr.Number)
 	if err != nil {
-		return false, fmt.Errorf("check PR throttle: %w", err)
+		return throttleDecision{}, fmt.Errorf("check PR throttle: %w", err)
 	}
-	if lastReview.IsZero() || time.Since(lastReview) >= throttle {
-		return false, nil
+	elapsed := p.nowFn().Sub(lastReview)
+	if lastReview.IsZero() || elapsed >= throttle {
+		return throttleDecision{}, nil
 	}
-	nextReview := lastReview.Add(throttle)
-	desc := fmt.Sprintf("Review deferred — next eligible at %s", nextReview.UTC().Format("15:04 UTC"))
+	return throttleDecision{
+		throttled: true,
+		quietOnly: base <= 0 || elapsed >= base,
+		// With the quiet-hours interval this can overstate the wait for
+		// bypass users, who become eligible at the first poll after the
+		// window ends. The status is advisory; capping at the window end
+		// isn't worth the wrap-around complexity.
+		nextEligible: lastReview.Add(throttle),
+	}, nil
+}
+
+// postDeferredStatus publishes the pending "review deferred" commit status
+// for a throttled push. Callers must finish panel retention or supersede
+// bookkeeping first: this is a synchronous GitHub call, and a retained panel
+// completing during it must already carry its allow_stale_post flag or the
+// posting goroutine's atomic stale-head retirement discards its review.
+func (p *CIPoller) postDeferredStatus(ghRepo string, pr ghPR, nextEligible time.Time) {
+	desc := fmt.Sprintf("Review deferred — next eligible at %s", nextEligible.UTC().Format("15:04 UTC"))
 	if err := p.callSetCommitStatus(ghRepo, pr.HeadRefOid, "pending", desc); err != nil {
 		log.Printf("CI poller: failed to set throttle status: %v", err)
 	}
-	return true, nil
 }
 
 // resolveCIMembers resolves the panel members and synthesis spec for a PR. When
@@ -1740,10 +1834,41 @@ func (p *CIPoller) guardPanelPostTarget(ctx context.Context, row *storage.CIPane
 		return false
 	}
 	if target.HeadSHA != "" && !strings.EqualFold(target.HeadSHA, row.HeadSHA) {
-		log.Printf("CI poller: PR %s#%d advanced from reviewed HEAD %s to %s, retiring panel %d without posting",
+		// Retire-unless-flagged as one atomic statement. An in-memory
+		// row.AllowStalePost check would race with a quiet-hours poll
+		// marking the panel during the target lookup above; the database
+		// serializes this against MarkPanelsAllowStalePost so exactly one
+		// side wins.
+		retired, err := p.db.MarkPanelRetiredIfStalePostDisallowed(row.ID)
+		if err != nil {
+			log.Printf("CI poller: error retiring stale-head panel %d: %v", row.ID, err)
+			p.releasePanelClaim(row.ID)
+			return false
+		}
+		if retired {
+			log.Printf("CI poller: PR %s#%d advanced from reviewed HEAD %s to %s, retiring panel %d without posting",
+				row.GithubRepo, row.PRNumber, gitpkg.ShortSHA(row.HeadSHA), gitpkg.ShortSHA(target.HeadSHA), row.ID)
+			if err := p.db.DeleteReviewAttempt(row.GithubRepo, row.PRNumber, row.HeadSHA); err != nil {
+				log.Printf("CI poller: error deleting stale-head review attempt for %s#%d@%s: %v",
+					row.GithubRepo, row.PRNumber, gitpkg.ShortSHA(row.HeadSHA), err)
+			}
+			return false
+		}
+		// Zero rows: either the quiet-hours flag won the race or the row
+		// went terminal through another path. Reload to tell them apart.
+		fresh, err := p.db.GetCIPanelByRunUUID(row.PanelRunUUID)
+		if err != nil {
+			log.Printf("CI poller: error reloading panel %d after stale-head check: %v", row.ID, err)
+			p.releasePanelClaim(row.ID)
+			return false
+		}
+		if !fresh.AllowStalePost || fresh.RetiredAt != nil || fresh.PostedAt != nil {
+			return false // terminal via another path; nothing to post
+		}
+		// Quiet hours retained this panel through the HEAD advance; post its
+		// snapshot review rather than discarding the completed run.
+		log.Printf("CI poller: PR %s#%d advanced from reviewed HEAD %s to %s, posting retained quiet-hours snapshot (panel %d)",
 			row.GithubRepo, row.PRNumber, gitpkg.ShortSHA(row.HeadSHA), gitpkg.ShortSHA(target.HeadSHA), row.ID)
-		p.retirePanelAndDeleteAttempt(row, "stale-head")
-		return false
 	}
 	match, err := p.panelRunMatchesTargetRepo(row)
 	if err != nil {
