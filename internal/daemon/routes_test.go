@@ -843,7 +843,49 @@ func TestHumaOpenAPISpec(t *testing.T) {
 	require.True(t, ok, "enqueue 200 response should have a schema")
 	oneOf, ok := schema["oneOf"].([]any)
 	require.True(t, ok, "enqueue 200 response should use oneOf")
-	assert.Len(t, oneOf, 2)
+	assert.Len(t, oneOf, 3)
+
+	components, ok := spec["components"].(map[string]any)
+	require.True(t, ok, "spec must have components")
+	schemas, ok := components["schemas"].(map[string]any)
+	require.True(t, ok, "components must have schemas")
+	reviewJob, ok := schemas["ReviewJob"].(map[string]any)
+	require.True(t, ok, "schemas must include ReviewJob")
+	reviewJobRequired, ok := reviewJob["required"].([]any)
+	require.True(t, ok, "ReviewJob must declare required fields")
+	assert.NotContains(t, reviewJobRequired, "uuid",
+		"general ReviewJob must preserve optional UUID compatibility")
+
+	enqueueCreated, ok := schemas["EnqueueCreatedResponse"].(map[string]any)
+	require.True(t, ok, "schemas must include a dedicated enqueue response")
+	enqueueRequired, ok := enqueueCreated["required"].([]any)
+	require.True(t, ok, "enqueue response must declare required fields")
+	for _, field := range []string{"id", "uuid", "git_ref", "status"} {
+		assert.Contains(t, enqueueRequired, field,
+			"enqueue response must require %s", field)
+	}
+
+	statusCreated, ok := responses["201"].(map[string]any)
+	require.True(t, ok, "enqueue should document created response")
+	createdContent, ok := statusCreated["content"].(map[string]any)
+	require.True(t, ok, "enqueue 201 response should have content")
+	createdJSON, ok := createdContent["application/json"].(map[string]any)
+	require.True(t, ok, "enqueue 201 response should document JSON")
+	createdSchema, ok := createdJSON["schema"].(map[string]any)
+	require.True(t, ok, "enqueue 201 response should have a schema")
+	createdOneOf, ok := createdSchema["oneOf"].([]any)
+	require.True(t, ok, "enqueue 201 response should use oneOf")
+	require.Len(t, createdOneOf, 3,
+		"enqueue 201 must document created, panel, and skipped responses")
+	createdRefs := make([]any, 0, len(createdOneOf))
+	for _, member := range createdOneOf {
+		ref, ok := member.(map[string]any)
+		require.True(t, ok)
+		createdRefs = append(createdRefs, ref["$ref"])
+	}
+	assert.Equal(t, "#/components/schemas/EnqueueCreatedResponse", createdRefs[0])
+	assert.Contains(t, createdRefs, "#/components/schemas/PanelEnqueueResponse")
+	assert.Contains(t, createdRefs, "#/components/schemas/EnqueueSkippedResponse")
 }
 
 func TestHumaListRepos(t *testing.T) {

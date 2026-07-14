@@ -28,6 +28,17 @@ type EnqueueRequest struct {
 	Source       string   `json:"source,omitempty"`        // Provenance, e.g. "post_commit" (empty = foreground)
 }
 
+// EnqueueCreatedResponse is returned when an enqueue creates a single job.
+// It documents the stronger contract of a successfully created job without
+// changing the general ReviewJob model used by list and legacy APIs: the
+// UUID field shadows ReviewJob.UUID (encoding/json keeps the shallower
+// field), so the launch UUID that storage assigns atomically at insert is
+// always emitted and OpenAPI marks it required.
+type EnqueueCreatedResponse struct {
+	*storage.ReviewJob
+	UUID string `json:"uuid"`
+}
+
 // PanelEnqueueResponse is returned when an enqueue fans out into a panel run.
 // It embeds the synthesis job (the run handle = its ID) and lists the member
 // job IDs and the shared run uuid.

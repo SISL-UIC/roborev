@@ -14,6 +14,20 @@ roborev run --wait "Find simplification opportunities in this codebase"
 roborev run --agentic "Add input validation to the user controller"
 ```
 
+For automation that needs a durable handle immediately after enqueue, use
+`roborev run --json`. Successful machine mode writes exactly one JSON document
+to stdout:
+
+```json
+{"job_id":42,"job_uuid":"00000000-0000-4000-8000-000000000042","git_ref":"run","status":"queued"}
+```
+
+The receipt comes from the atomic enqueue response; it does not parse human
+console output. If the daemon skips the enqueue (for example on an excluded
+branch), machine mode instead writes a single `{"skipped":true,"reason":"..."}`
+document and exits zero. `--json` cannot be combined with `--quiet`, `--wait`,
+or the global `--verbose` flag.
+
 ## Use Cases
 
 ### Targeted File Reviews
@@ -87,6 +101,7 @@ cat review-checklist.txt | roborev run --wait
 | `--agentic` | Enable agentic mode (allow file edits and commands) |
 | `--yolo` | Alias for `--agentic` |
 | `--quiet` | Suppress output (just enqueue) |
+| `--json` | Emit one machine-readable launch receipt (incompatible with `--quiet`, `--wait`, and global `--verbose`) |
 
 ## Repository Context
 
