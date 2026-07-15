@@ -1127,6 +1127,173 @@ func TestGetCurrentBranch(t *testing.T) {
 	})
 }
 
+func TestInferBranchForCommit(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("exact tip match", func(t *testing.T) {
+		repo := NewTestRepoWithCommit(t)
+		repo.CheckoutNewBranch("feature")
+		repo.CommitFile("f.txt", "content", "feature commit")
+		sha := repo.HeadSHA()
+		repo.Run("checkout", "--detach")
+
+		assert.Equal(t, "feature", InferBranchForCommit(ctx, repo.Dir, sha))
+	})
+
+	t.Run("one-behind ancestor (detached worktree shape)", func(t *testing.T) {
+		repo := NewTestRepoWithCommit(t)
+		repo.CheckoutNewBranch("feature")
+		repo.CommitFile("f.txt", "content", "feature commit")
+		repo.Run("checkout", "--detach")
+		repo.CommitFile("g.txt", "content", "detached commit")
+		sha := repo.HeadSHA()
+
+		// feature tip is 1 behind sha; the default branch is 2 behind.
+		assert.Equal(t, "feature", InferBranchForCommit(ctx, repo.Dir, sha))
+	})
+
+	t.Run("nearest of several ancestor branches", func(t *testing.T) {
+		repo := NewTestRepoWithCommit(t)
+		repo.CheckoutNewBranch("far")
+		repo.CommitFile("a.txt", "a", "far commit")
+		repo.CheckoutNewBranch("near")
+		repo.CommitFile("b.txt", "b", "near commit")
+		repo.Run("checkout", "--detach")
+		repo.CommitFile("c.txt", "c", "detached commit")
+		sha := repo.HeadSHA()
+
+		assert.Equal(t, "near", InferBranchForCommit(ctx, repo.Dir, sha))
+	})
+
+	t.Run("distance tie returns empty", func(t *testing.T) {
+		repo := NewTestRepoWithCommit(t)
+		repo.CheckoutNewBranch("feature")
+		repo.CommitFile("f.txt", "content", "shared tip")
+		repo.Run("branch", "twin") // second branch at the same tip
+		repo.Run("checkout", "--detach")
+		repo.CommitFile("g.txt", "content", "detached commit")
+		sha := repo.HeadSHA()
+
+		assert.Empty(t, InferBranchForCommit(ctx, repo.Dir, sha))
+	})
+
+	t.Run("merge ranks by first-parent distance, not history size", func(t *testing.T) {
+		repo := NewTestRepoWithCommit(t)
+		def := GetCurrentBranch(repo.Dir)
+		repo.CheckoutNewBranch("side")
+		repo.CommitFile("s1.txt", "1", "side 1")
+		repo.CommitFile("s2.txt", "2", "side 2")
+		repo.CommitFile("s3.txt", "3", "side 3")
+		repo.CheckoutBranch(def)
+		repo.CheckoutNewBranch("mainline")
+		repo.CommitFile("m1.txt", "1", "mainline 1")
+		repo.Run("checkout", "--detach")
+		repo.Run("merge", "--no-ff", "side", "-m", "merge side")
+		sha := repo.HeadSHA()
+
+		// The merge's first parent is mainline's tip (1 first-parent step
+		// away); side's tip is a merge parent with a 3-commit history. A
+		// reachable-set count would score side closer (2 vs 4) purely
+		// because of history size; first-parent distance attributes the
+		// merge to the mainline it was made on.
+		assert.Equal(t, "mainline", InferBranchForCommit(ctx, repo.Dir, sha))
+	})
+
+	t.Run("off-mainline merge parent does not tie the first-parent branch", func(t *testing.T) {
+		repo := NewTestRepoWithCommit(t)
+		repo.CheckoutNewBranch("mainline")
+		repo.CommitFile("m1.txt", "1", "mainline 1")
+		repo.CheckoutNewBranch("side") // forked at mainline's tip
+		repo.CommitFile("s1.txt", "1", "side 1")
+		repo.CheckoutBranch("mainline")
+		repo.Run("checkout", "--detach")
+		repo.Run("merge", "--no-ff", "side", "-m", "merge side")
+		sha := repo.HeadSHA()
+
+		// side's tip is reachable only through the merge's second parent,
+		// yet its first-parent count matches mainline's (both exclude
+		// everything but the merge commit). Only branches on the target's
+		// first-parent chain may rank, so mainline wins instead of tying.
+		assert.Equal(t, "mainline", InferBranchForCommit(ctx, repo.Dir, sha))
+	})
+
+	t.Run("candidate-specific git failure aborts inference", func(t *testing.T) {
+		repo := NewTestRepoWithCommit(t)
+		def := GetCurrentBranch(repo.Dir)
+		defTip := strings.TrimSpace(repo.Run("rev-parse", def))
+		repo.Run("checkout", "--detach")
+		repo.CommitFile("f.txt", "content", "detached commit")
+		sha := repo.HeadSHA()
+
+		// A candidate whose distance lookup fails must abort the whole
+		// ranking: skipping it like an off-chain tip could crown a farther
+		// branch that the failed candidate would have beaten or tied.
+		candidates := []string{"broken", def}
+		tips := map[string]string{
+			"broken": "0000000000000000000000000000000000000000",
+			def:      defTip,
+		}
+		assert.Empty(t, nearestBranch(ctx, repo.Dir, sha, candidates, tips))
+	})
+
+	t.Run("two exact tips returns empty", func(t *testing.T) {
+		repo := NewTestRepoWithCommit(t)
+		repo.CheckoutNewBranch("feature")
+		repo.CommitFile("f.txt", "content", "shared tip")
+		repo.Run("branch", "twin")
+		sha := repo.HeadSHA()
+		repo.Run("checkout", "--detach")
+
+		assert.Empty(t, InferBranchForCommit(ctx, repo.Dir, sha))
+	})
+
+	t.Run("no ancestor branch returns empty", func(t *testing.T) {
+		repo := NewTestRepoWithCommit(t)
+		branch := GetCurrentBranch(repo.Dir)
+		repo.Run("checkout", "--detach")
+		repo.CommitFile("f.txt", "content", "detached commit")
+		sha := repo.HeadSHA()
+		repo.Run("branch", "-D", branch)
+
+		assert.Empty(t, InferBranchForCommit(ctx, repo.Dir, sha))
+	})
+
+	t.Run("more than 20 candidates fails closed", func(t *testing.T) {
+		repo := NewTestRepoWithCommit(t)
+		// 21 ancestor branches at increasing depth; nearest would be b21.
+		for i := 1; i <= 21; i++ {
+			repo.CommitFile("f.txt", fmt.Sprintf("v%d", i), fmt.Sprintf("c%d", i))
+			repo.Run("branch", fmt.Sprintf("b%d", i))
+		}
+		repo.Run("checkout", "--detach")
+		repo.CommitFile("g.txt", "content", "detached commit")
+		sha := repo.HeadSHA()
+
+		// b21 is distance 1 and would win, but 21 non-exact candidates
+		// (plus the default branch, 22 total) exceed the cap: fail closed
+		// rather than rank a truncated subset.
+		assert.Empty(t, InferBranchForCommit(ctx, repo.Dir, sha))
+	})
+
+	t.Run("unique exact match wins above the cap", func(t *testing.T) {
+		repo := NewTestRepoWithCommit(t)
+		for i := 1; i <= 21; i++ {
+			repo.CommitFile("f.txt", fmt.Sprintf("v%d", i), fmt.Sprintf("c%d", i))
+			repo.Run("branch", fmt.Sprintf("b%d", i))
+		}
+		repo.Run("checkout", "--detach")
+		repo.CommitFile("g.txt", "content", "detached commit")
+		sha := repo.HeadSHA()
+		repo.Run("branch", "exact-tip")
+
+		assert.Equal(t, "exact-tip", InferBranchForCommit(ctx, repo.Dir, sha))
+	})
+
+	t.Run("non-repo returns empty", func(t *testing.T) {
+		assert.Empty(t, InferBranchForCommit(ctx, t.TempDir(), "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"))
+	})
+}
+
 func TestGetUpstream(t *testing.T) {
 	t.Run("returns empty when no upstream configured", func(t *testing.T) {
 		repo := NewTestRepoWithCommit(t)
