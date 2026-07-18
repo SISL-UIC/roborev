@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
@@ -151,7 +152,7 @@ func (db *DB) exportCIMetricsPanels(opts ExportCIMetricsOptions, cursor *ciMetri
 		WHERE ` + strings.Join(conditions, " AND ") + `
 		ORDER BY ` + postedExpr + ` ASC, cp.id ASC
 		LIMIT ?`
-	rows, err := db.Query(query, args...)
+	rows, err := db.bun.QueryContext(context.Background(), query, args...)
 	if err != nil {
 		return ExportCIMetricsPage{}, fmt.Errorf("query ci metrics export: %w", err)
 	}
@@ -294,7 +295,7 @@ func (db *DB) exportCIMetricsLegacy(opts ExportCIMetricsOptions, cursor *ciMetri
 		HAVING ` + strings.Join(having, " AND ") + `
 		ORDER BY 6 ASC, 1 ASC
 		LIMIT ?`
-	rows, err := db.Query(query, args...)
+	rows, err := db.bun.QueryContext(context.Background(), query, args...)
 	if err != nil {
 		return ExportCIMetricsPage{}, fmt.Errorf("query legacy ci metrics export: %w", err)
 	}
@@ -368,7 +369,7 @@ func (db *DB) exportCIMetricsLegacy(opts ExportCIMetricsOptions, cursor *ciMetri
 // this runs against complete data and is never a live, drifting feed.
 func (db *DB) legacyPanelEraEnd() (string, error) {
 	var end sql.NullString
-	err := db.QueryRow(`
+	err := db.bun.QueryRowContext(context.Background(), `
 		SELECT MIN(t) FROM (
 			SELECT MIN(strftime('%Y-%m-%dT%H:%M:%SZ', j.enqueued_at)) AS t
 			FROM review_jobs j
@@ -444,7 +445,7 @@ var legacyUnitWindowEndSubquery = `(
 // unit in id order — bounded to the adjacency window and pre-panel era like
 // the unit query — shaped as ExportCIPanelJob rows tagged role "review".
 func (db *DB) legacyUnitJobs(repoID int64, gitRef, eraEnd string) ([]ExportCIPanelJob, error) {
-	rows, err := db.Query(`
+	rows, err := db.bun.QueryContext(context.Background(), `
 		SELECT j.uuid, j.agent, j.model, j.provider, j.status,
 		       `+legacyUnitTimeExpr("j.started_at")+`,
 		       `+legacyUnitTimeExpr("j.finished_at")+`
@@ -537,7 +538,7 @@ func scanCIMetricsRow(rows *sql.Rows) (int64, ExportCIPanel, string, error) {
 }
 
 func (db *DB) exportCIPanelJobs(panelRunUUID string) ([]ExportCIPanelJob, error) {
-	rows, err := db.Query(`
+	rows, err := db.bun.QueryContext(context.Background(), `
 		SELECT j.uuid, COALESCE(j.panel_role, ''), j.agent, j.model,
 		       j.provider, j.status, j.started_at, j.finished_at
 		FROM review_jobs j
@@ -674,7 +675,7 @@ func (db *DB) resolveCIMetricsCursor(cursor string, legacy bool) (*ciMetricsCurs
 		existsArgs = []any{decoded.PanelID, eraEnd, eraEnd, eraEnd, decoded.PostedAt}
 	}
 	var count int
-	if err := db.QueryRow(existsQuery, existsArgs...).Scan(&count); err != nil {
+	if err := db.bun.QueryRowContext(context.Background(), existsQuery, existsArgs...).Scan(&count); err != nil {
 		return nil, fmt.Errorf("validate ci metrics cursor: %w", err)
 	}
 	if count == 0 {

@@ -169,17 +169,21 @@ func (db *DB) createCIPanelRunTx(ctx context.Context, exec execer, githubRepo st
 ) (bool, []*ReviewJob, *ReviewJob, error) {
 	runUUID := GenerateUUID()
 
-	if _, err := exec.ExecContext(ctx,
-		`DELETE FROM ci_pr_panels
-		 WHERE github_repo = ? AND pr_number = ? AND head_sha = ? AND retired_at IS NOT NULL`,
-		githubRepo, prNumber, headSHA); err != nil {
+	deleteRetired := db.bun.NewDelete().Model((*ciPanelRow)(nil)).
+		Where("github_repo = ?", githubRepo).Where("pr_number = ?", prNumber).
+		Where("head_sha = ?", headSHA).Where("retired_at IS NOT NULL")
+	if _, err := exec.ExecContext(ctx, deleteRetired.String()); err != nil {
 		return false, nil, nil, err
 	}
 
-	res, err := exec.ExecContext(ctx,
-		`INSERT OR IGNORE INTO ci_pr_panels (github_repo, pr_number, head_sha, panel_run_uuid, created_at)
-		 VALUES (?, ?, ?, ?, ?)`,
-		githubRepo, prNumber, headSHA, runUUID, dbTimeFromValue(now))
+	row := ciPanelRow{
+		GithubRepo: githubRepo, PRNumber: prNumber, HeadSHA: headSHA,
+		PanelRunUUID: runUUID, CreatedAt: dbTimeFromValue(now),
+	}
+	insert := db.bun.NewInsert().Model(&row).
+		Column("github_repo", "pr_number", "head_sha", "panel_run_uuid", "created_at").
+		On("CONFLICT (github_repo, pr_number, head_sha) DO NOTHING")
+	res, err := exec.ExecContext(ctx, insert.String())
 	if err != nil {
 		return false, nil, nil, err
 	}
@@ -214,8 +218,9 @@ func (db *DB) createCIPanelRunTx(ctx context.Context, exec execer, githubRepo st
 	if err != nil {
 		return false, nil, nil, err
 	}
-	if _, err := exec.ExecContext(ctx,
-		`UPDATE ci_pr_panels SET synthesis_job_id = ? WHERE panel_run_uuid = ?`, syn.ID, runUUID); err != nil {
+	backfill := db.bun.NewUpdate().Model((*ciPanelRow)(nil)).
+		Set("synthesis_job_id = ?", syn.ID).Where("panel_run_uuid = ?", runUUID)
+	if _, err := exec.ExecContext(ctx, backfill.String()); err != nil {
 		return false, nil, nil, err
 	}
 	return true, mems, syn, nil
@@ -272,7 +277,7 @@ func (db *DB) ReleasePanelPostClaim(id int64) error {
 // of terminal metrics. The attempt row may already be gone (deleted by
 // closed-PR cleanup); zero rows affected there is not an error.
 func (db *DB) MarkPanelPosted(id int64, outcome string) error {
-	tx, err := db.Begin()
+	tx, err := db.bun.BeginTx(context.Background(), nil)
 	if err != nil {
 		return fmt.Errorf("mark panel posted: begin: %w", err)
 	}

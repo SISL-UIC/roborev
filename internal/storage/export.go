@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
@@ -244,7 +245,7 @@ func (db *DB) queryExportReviewRows(opts ExportReviewsOptions, cursor *exportCur
 		LEFT JOIN ci_pr_panels cp ON cp.panel_run_uuid = j.panel_run_uuid
 		WHERE ` + strings.Join(conditions, " AND ") + `
 		ORDER BY ` + completedExpr + ` ASC, rv.uuid ASC` + limitClause
-	return db.Query(query, args...)
+	return db.bun.QueryContext(context.Background(), query, args...)
 }
 
 func scanExportReviewRow(rows *sql.Rows) (exportReviewRow, error) {
@@ -333,7 +334,7 @@ func (db *DB) exportSubagents(panelRunUUID string, profile ExportProfile) ([]Exp
 	if profile == ExportProfileContent {
 		outputExpr = "rv.output"
 	}
-	rows, err := db.Query(`
+	rows, err := db.bun.QueryContext(context.Background(), `
 		SELECT rv.uuid, rv.verdict_bool, rv.created_at, `+outputExpr+`,
 		       j.agent, j.model, j.review_type, j.panel_member_name, j.started_at, j.finished_at,
 		       j.token_usage
@@ -634,7 +635,7 @@ func decodeExportCursor(cursor string) (*exportCursor, error) {
 func (db *DB) exportCursorReviewExists(cursor *exportCursor) (bool, error) {
 	completedExpr := sqliteNormalizedTimestampExpr("rv.created_at")
 	var count int
-	err := db.QueryRow(`
+	err := db.bun.QueryRowContext(context.Background(), `
 		SELECT COUNT(1)
 		FROM reviews rv
 		JOIN review_jobs j ON j.id = rv.job_id
