@@ -479,26 +479,27 @@ func (p *PgPool) EnsureSchema(ctx context.Context) error {
 // a client is syncing to a different database than before.
 func (p *PgPool) GetDatabaseID(ctx context.Context) (string, error) {
 	var id string
-	err := p.pool.QueryRow(ctx, `SELECT value FROM sync_metadata WHERE key = 'database_id'`).Scan(&id)
+	err := p.bun.NewSelect().Model((*pgSyncMetadataRow)(nil)).Column("value").
+		Where("key = ?", "database_id").Scan(ctx, &id)
 	if err == nil {
 		return id, nil
 	}
-	if !errors.Is(err, pgx.ErrNoRows) {
+	if !errors.Is(err, sql.ErrNoRows) {
 		return "", fmt.Errorf("query database_id: %w", err)
 	}
 
 	// Generate new ID - use ON CONFLICT to handle concurrent creation
 	newID := GenerateUUID()
-	_, err = p.pool.Exec(ctx, `
-		INSERT INTO sync_metadata (key, value) VALUES ('database_id', $1)
-		ON CONFLICT (key) DO NOTHING
-	`, newID)
+	row := pgSyncMetadataRow{Key: "database_id", Value: newID}
+	_, err = p.bun.NewInsert().Model(&row).Column("key", "value").
+		On("CONFLICT (key) DO NOTHING").Exec(ctx)
 	if err != nil {
 		return "", fmt.Errorf("insert database_id: %w", err)
 	}
 
 	// Re-read in case another process inserted first
-	err = p.pool.QueryRow(ctx, `SELECT value FROM sync_metadata WHERE key = 'database_id'`).Scan(&id)
+	err = p.bun.NewSelect().Model((*pgSyncMetadataRow)(nil)).Column("value").
+		Where("key = ?", "database_id").Scan(ctx, &id)
 	if err != nil {
 		return "", fmt.Errorf("re-read database_id: %w", err)
 	}
@@ -649,13 +650,12 @@ func (p *PgPool) Ping(ctx context.Context) error {
 
 // RegisterMachine registers or updates this machine in the machines table
 func (p *PgPool) RegisterMachine(ctx context.Context, machineID, name string) error {
-	_, err := p.pool.Exec(ctx, `
-		INSERT INTO machines (machine_id, name, last_seen_at)
-		VALUES ($1, $2, NOW())
-		ON CONFLICT (machine_id) DO UPDATE SET
-			name = COALESCE(EXCLUDED.name, machines.name),
-			last_seen_at = NOW()
-	`, machineID, name)
+	row := pgMachineRow{MachineID: machineID, Name: name}
+	_, err := p.bun.NewInsert().Model(&row).Column("machine_id", "name").
+		Value("last_seen_at", "NOW()").
+		On("CONFLICT (machine_id) DO UPDATE").
+		Set("name = COALESCE(EXCLUDED.name, machines.name)").
+		Set("last_seen_at = NOW()").Exec(ctx)
 	if err != nil {
 		return fmt.Errorf("register machine: %w", err)
 	}
@@ -664,32 +664,30 @@ func (p *PgPool) RegisterMachine(ctx context.Context, machineID, name string) er
 
 // GetOrCreateRepo finds or creates a repo by identity, returns the PostgreSQL ID
 func (p *PgPool) GetOrCreateRepo(ctx context.Context, identity string) (int64, error) {
-	var id int64
-	err := p.pool.QueryRow(ctx, `
-		INSERT INTO repos (identity)
-		VALUES ($1)
-		ON CONFLICT (identity) DO UPDATE SET identity = EXCLUDED.identity
-		RETURNING id
-	`, identity).Scan(&id)
+	row := repoRow{Identity: &identity}
+	err := p.bun.NewInsert().Model(&row).Column("identity").
+		On("CONFLICT (identity) DO UPDATE").Set("identity = EXCLUDED.identity").
+		Returning("id").Scan(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("get or create repo: %w", err)
 	}
-	return id, nil
+	return row.ID, nil
 }
 
 // GetOrCreateCommit finds or creates a commit, returns the PostgreSQL ID
 func (p *PgPool) GetOrCreateCommit(ctx context.Context, repoID int64, sha, author, subject string, timestamp time.Time) (int64, error) {
-	var id int64
-	err := p.pool.QueryRow(ctx, `
-		INSERT INTO commits (repo_id, sha, author, subject, timestamp)
-		VALUES ($1, $2, $3, $4, $5)
-		ON CONFLICT (repo_id, sha) DO UPDATE SET sha = EXCLUDED.sha
-		RETURNING id
-	`, repoID, sha, author, subject, timestamp).Scan(&id)
+	row := commitRow{
+		RepoID: repoID, SHA: sha, Author: author, Subject: subject,
+		Timestamp: dbTimeFromValue(timestamp),
+	}
+	err := p.bun.NewInsert().Model(&row).
+		Column("repo_id", "sha", "author", "subject", "timestamp").
+		On("CONFLICT (repo_id, sha) DO UPDATE").Set("sha = EXCLUDED.sha").
+		Returning("id").Scan(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("get or create commit: %w", err)
 	}
-	return id, nil
+	return row.ID, nil
 }
 
 // Tx runs a function within a transaction

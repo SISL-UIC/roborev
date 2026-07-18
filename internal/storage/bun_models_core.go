@@ -175,6 +175,19 @@ type commitRow struct {
 	CreatedAt     dbTime `bun:"created_at"`
 }
 
+type pgSyncMetadataRow struct {
+	bun.BaseModel `bun:"table:sync_metadata,alias:sm"`
+	Key           string `bun:"key,pk"`
+	Value         string `bun:"value"`
+}
+
+type pgMachineRow struct {
+	bun.BaseModel `bun:"table:machines,alias:m"`
+	MachineID     string `bun:"machine_id,pk"`
+	Name          string `bun:"name"`
+	LastSeenAt    dbTime `bun:"last_seen_at"`
+}
+
 func (row commitRow) toModel() Commit {
 	return Commit{
 		ID:        row.ID,
