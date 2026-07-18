@@ -265,8 +265,9 @@ Raw SQL is permitted only in these categories:
 - SQLite and PostgreSQL schema creation and forward migrations;
 - schema introspection and migration guards;
 - SQLite pragmas;
-- guarded claims and state transitions whose correctness depends on one atomic
-  statement;
+- unique-winner claims whose exact statement is the concurrency primitive;
+- expression-heavy state transitions that Bun builders cannot express as
+  clearly or safely;
 - complex upserts whose conflict policy is clearer as explicit SQL;
 - database-native maintenance or cursor expressions not represented clearly by
   Bun;

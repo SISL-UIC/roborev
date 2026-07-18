@@ -38,7 +38,7 @@ func scanReviewAttempts(query *bun.SelectQuery) ([]ReviewAttempt, error) {
 	if err := query.Scan(context.Background(), &rows); err != nil {
 		return nil, err
 	}
-	attempts := make([]ReviewAttempt, 0, len(rows))
+	var attempts []ReviewAttempt
 	for _, row := range rows {
 		attempts = append(attempts, row.toModel())
 	}
@@ -89,7 +89,7 @@ func (db *DB) reserveReviewAttemptExec(ctx context.Context, exec execer, repo st
 			"next_attempt_at", "last_error_class", "consecutive_genuine_attempts",
 			"last_error_excerpt", "last_panel_run_uuid", "state", "updated_at").
 		On("CONFLICT (github_repo, pr_number, head_sha) DO NOTHING")
-	res, err := exec.ExecContext(ctx, insert.String())
+	res, err := insert.Conn(exec).Exec(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("reserve review attempt: %w", err)
 	}

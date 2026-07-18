@@ -225,7 +225,7 @@ func (db *DB) scanReusableSessionCandidates(
 		Where("j.session_id <> ''").
 		Where("COALESCE(NULLIF(j.review_type, ''), 'default') = ?", reviewType).
 		Where("COALESCE(j.worktree_path, '') = ?", worktreePath).
-		OrderExpr("COALESCE(j.finished_at, j.updated_at, j.enqueued_at) DESC, j.id DESC")
+		OrderExpr("julianday(COALESCE(j.finished_at, j.updated_at, j.enqueued_at)) DESC, j.id DESC")
 	if limit > 0 {
 		query = query.Limit(limit).Offset(offset)
 	}

@@ -103,10 +103,10 @@ type EnqueueOpts struct {
 }
 
 // execer is satisfied by *DB (it embeds *sql.DB), *sql.Conn, and *sql.Tx.
-// It lets the single INSERT path run on either the pooled DB or a dedicated
-// transaction connection.
+// It lets Bun execute against either the pooled DB or a caller-owned
+// transaction connection without rendering query strings.
 type execer interface {
-	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	bun.IConn
 }
 
 // EnqueueJob creates a new review job. The job type is inferred from opts.
@@ -204,12 +204,13 @@ func (db *DB) insertJobTx(ctx context.Context, exec execer, opts EnqueueOpts, ui
 	row := jobRowForInsert(*job)
 	insert := db.bun.NewInsert().
 		Model(&row).
-		Column(sqliteJobInsertColumns...)
-	result, err := exec.ExecContext(ctx, insert.String())
+		Column(sqliteJobInsertColumns...).
+		Returning("id")
+	err := insert.Conn(exec).Scan(ctx)
 	if err != nil {
 		return nil, err
 	}
-	job.ID, _ = result.LastInsertId()
+	job.ID = row.ID
 	return job, nil
 }
 

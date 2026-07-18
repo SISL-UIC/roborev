@@ -172,7 +172,7 @@ func (db *DB) createCIPanelRunTx(ctx context.Context, exec execer, githubRepo st
 	deleteRetired := db.bun.NewDelete().Model((*ciPanelRow)(nil)).
 		Where("github_repo = ?", githubRepo).Where("pr_number = ?", prNumber).
 		Where("head_sha = ?", headSHA).Where("retired_at IS NOT NULL")
-	if _, err := exec.ExecContext(ctx, deleteRetired.String()); err != nil {
+	if _, err := deleteRetired.Conn(exec).Exec(ctx); err != nil {
 		return false, nil, nil, err
 	}
 
@@ -183,7 +183,7 @@ func (db *DB) createCIPanelRunTx(ctx context.Context, exec execer, githubRepo st
 	insert := db.bun.NewInsert().Model(&row).
 		Column("github_repo", "pr_number", "head_sha", "panel_run_uuid", "created_at").
 		On("CONFLICT (github_repo, pr_number, head_sha) DO NOTHING")
-	res, err := exec.ExecContext(ctx, insert.String())
+	res, err := insert.Conn(exec).Exec(ctx)
 	if err != nil {
 		return false, nil, nil, err
 	}
@@ -220,7 +220,7 @@ func (db *DB) createCIPanelRunTx(ctx context.Context, exec execer, githubRepo st
 	}
 	backfill := db.bun.NewUpdate().Model((*ciPanelRow)(nil)).
 		Set("synthesis_job_id = ?", syn.ID).Where("panel_run_uuid = ?", runUUID)
-	if _, err := exec.ExecContext(ctx, backfill.String()); err != nil {
+	if _, err := backfill.Conn(exec).Exec(ctx); err != nil {
 		return false, nil, nil, err
 	}
 	return true, mems, syn, nil

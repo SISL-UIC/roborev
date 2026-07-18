@@ -387,7 +387,6 @@ git commit -m "Move core storage queries to Bun"
 
 - Modify: `internal/storage/jobs.go`
 - Modify: `internal/storage/reviews.go`
-- Modify: `internal/storage/review_attempts.go`
 - Modify: `internal/storage/hydration.go`
 - Modify: `internal/storage/verdict.go`
 - Modify: `internal/storage/cost.go`
@@ -431,11 +430,19 @@ nullable IDs, and insert defaults before committing. Keep creation and query
 conversion as separate commits so either family can be reverted independently.
 
 ```bash
-git add internal/storage/jobs.go internal/storage/bun_models_jobs.go \
-  internal/storage/*job*_test.go internal/storage/db_filter_test.go
+git add -p internal/storage/jobs.go internal/storage/bun_models_jobs.go \
+  internal/storage/*job*_test.go
+git diff --cached
 git commit -m "Move job creation to Bun"
+git add -p internal/storage/jobs.go internal/storage/bun_models_jobs.go \
+  internal/storage/*job*_test.go internal/storage/db_filter_test.go
+git diff --cached
 git commit -m "Move job queries to Bun"
 ```
+
+The files overlap, so the creation commit must stage only creation/model hunks.
+Stage the remaining query and projection hunks separately for the query commit;
+do not stage every listed file before the first commit.
 
 - [x] **Step 5: Convert guarded job transitions**
 
@@ -495,8 +502,8 @@ Expected: PASS.
 
 ```bash
 git add internal/storage/jobs.go internal/storage/reviews.go \
-  internal/storage/review_attempts.go internal/storage/hydration.go \
-  internal/storage/verdict.go internal/storage/cost.go
+  internal/storage/hydration.go internal/storage/verdict.go \
+  internal/storage/cost.go
 git commit -m "Move review persistence to Bun"
 ```
 
@@ -506,12 +513,16 @@ git commit -m "Move review persistence to Bun"
 
 - Modify: `internal/storage/ci.go`
 - Modify: `internal/storage/ci_panels.go`
+- Modify: `internal/storage/review_attempts.go`
+- Modify: `internal/storage/bun_models_ci.go`
+- Modify: `internal/storage/repos.go`
+- Modify: `internal/storage/reviews.go`
 - Modify: `internal/storage/summary.go`
 - Modify: `internal/storage/export.go`
 - Modify: `internal/storage/export_ci.go`
 - Modify: `internal/daemon/server.go`
 - Modify: `internal/daemon/ci_poller.go`
-- Test: existing CI, panel, summary, export, and daemon tests.
+- Test: existing CI, panel, review-attempt, summary, export, and daemon tests.
 
 **Interfaces:**
 
@@ -519,7 +530,7 @@ git commit -m "Move review persistence to Bun"
 - Produces: `func (db *DB) CountReviews() (int, error)`
 - Produces: `func (db *DB) ListReposWithIdentity() ([]Repo, error)`
 
-- [ ] **Step 1: Run characterization tests**
+- [x] **Step 1: Run characterization tests**
 
 ```bash
 go test ./internal/storage -run \
@@ -529,44 +540,66 @@ go test ./internal/daemon -run 'Test.*CI|Test.*Panel|Test.*Telemetry' -count=1
 
 Expected: PASS before editing.
 
-- [ ] **Step 2: Convert CI review and panel CRUD**
+- [x] **Step 2: Convert CI review, attempt, and panel persistence**
 
-Use Bun for ordinary selects/inserts/updates. Keep raw Bun statements for panel
-creation, posting claims, retirement, and retry claims whose guarded affected
-row count is the state-machine transition.
+Use Bun builders for ordinary selects, inserts, deletes, and guarded updates,
+including updates whose affected-row count is inspected. Retain raw SQL only
+for SQLite transaction control, unique-winner claims whose exact statement is
+the concurrency primitive, and expression-heavy statements that are clearer
+and safer in explicit SQL. Execute Bun builders on caller-owned transactions
+with `Conn(exec).Exec` or `Conn(exec).Scan`; never render them with `String()`
+and pass the result to `database/sql`.
 
-- [ ] **Step 3: Convert summaries and exports**
-
-Use Bun select builders with explicit table expressions and projections. Keep
-SQLite-native duration expressions and keyset predicates as allowlisted raw
-expressions inside Bun queries. Preserve cursor order and metadata-only export
-profiles.
-
-- [ ] **Step 4: Move production SQL callers into storage methods**
+- [x] **Step 3: Move production SQL callers into storage methods**
 
 Replace the direct review count in `internal/daemon/server.go` with
 `CountReviews`. Replace the direct repo query in `internal/daemon/ci_poller.go`
 with `ListReposWithIdentity`. Leave the SQLite WAL checkpoint pragma in daemon
 lifecycle code as an explicitly allowed pragma.
 
-- [ ] **Step 5: Run focused tests**
+- [x] **Step 4: Verify and commit CI state persistence**
+
+Verify nil-versus-empty result shapes for review attempts, nullable panel
+fields and member index zero, historical SQLite timestamp parsing, concurrent
+duplicate creation and unique-winner behavior, affected-row semantics for
+guarded transitions, and full rollback when a multi-row panel transaction
+fails.
 
 ```bash
-go test ./internal/storage -run \
-  'Test.*CI|Test.*Panel|Test.*Summary|Test.*Export' -count=1
+go test ./internal/storage -run 'Test.*CI|Test.*Panel|Test.*ReviewAttempt' -count=1
 go test ./internal/daemon -run 'Test.*CI|Test.*Panel|Test.*Telemetry' -count=1
+git add internal/storage/ci.go internal/storage/ci_panels.go \
+  internal/storage/review_attempts.go internal/storage/bun_models_ci.go \
+  internal/storage/repos.go internal/storage/reviews.go \
+  internal/storage/hydration.go internal/daemon/server.go \
+  internal/daemon/ci_poller.go
+git commit -m "Move CI state persistence to Bun"
 ```
 
-Expected: PASS.
+- [x] **Step 5: Convert and commit summaries**
 
-- [ ] **Step 6: Commit reporting and CI conversion**
+Use Bun select builders for summary aggregation while preserving nullable
+aggregates, SQLite-native duration expressions, legacy timestamp inputs, and
+zero-row behavior.
 
 ```bash
-git add internal/storage/ci.go internal/storage/ci_panels.go \
-  internal/storage/summary.go internal/storage/export.go \
-  internal/storage/export_ci.go internal/daemon/server.go \
-  internal/daemon/ci_poller.go
-git commit -m "Move CI and reporting storage to Bun"
+go test ./internal/storage -run 'Test.*Summary' -count=1
+git add internal/storage/summary.go
+git commit -m "Move summary reporting to Bun"
+```
+
+- [x] **Step 6: Convert and commit exports**
+
+Use Bun select builders with explicit table expressions and projections. Keep
+SQLite-native duration expressions and keyset predicates as allowlisted raw
+expressions inside Bun queries. Preserve cursor order and metadata-only export
+profiles.
+
+```bash
+go test ./internal/storage -run 'Test.*Export|Test.*Panel' -count=1
+git add internal/storage/ci_panels.go internal/storage/export.go \
+  internal/storage/export_ci.go
+git commit -m "Route export queries through Bun"
 ```
 
 ### Task 6: Convert PostgreSQL schema access and sync persistence
@@ -638,7 +671,9 @@ guards, and synced-at updates.
 Keep `pgx.Batch` for review, response, or job operations where per-item results
 and fallback behavior are clearer than a Bun bulk insert. Route all non-batch
 operations through Bun. Ensure both paths use `PgPool.pool` and the Bun wrapper
-created from that same pool.
+created from that same pool. If a retained batch reuses a Bun-built statement,
+render it through the error-returning `AppendQuery` API; never use `String()`,
+which panics on query-construction errors.
 
 - [ ] **Step 9: Commit pull and local-merge conversion**
 

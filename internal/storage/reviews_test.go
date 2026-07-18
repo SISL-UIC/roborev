@@ -862,6 +862,45 @@ func TestFindReusableSessionCandidatesExcludesPanelAndNonReviewJobs(t *testing.T
 	assert.NotEqual(fix.ID, candidates[0].ID)
 }
 
+func TestFindReusableSessionCandidatesOrdersFractionalTimestampsChronologically(t *testing.T) {
+	db := openTestDB(t)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+
+	repo := createRepo(t, db, "/tmp/session-candidate-time-order")
+	base := EnqueueOpts{
+		RepoID:     repo.ID,
+		Branch:     "feature/session",
+		Agent:      "codex",
+		ReviewType: "default",
+		JobType:    JobTypeReview,
+	}
+
+	olderOpts := base
+	olderOpts.GitRef = "older"
+	older := createCompletedJobWithOptions(t, db, olderOpts, "older output")
+	setJobSession(t, db, older.ID, "session-older")
+
+	newerOpts := base
+	newerOpts.GitRef = "newer"
+	newer := createCompletedJobWithOptions(t, db, newerOpts, "newer output")
+	setJobSession(t, db, newer.ID, "session-newer")
+
+	_, err := db.Exec(`UPDATE review_jobs SET finished_at = ? WHERE id = ?`,
+		"2026-07-18T12:00:00Z", older.ID)
+	require.NoError(t, err)
+	_, err = db.Exec(`UPDATE review_jobs SET finished_at = ? WHERE id = ?`,
+		"2026-07-18T12:00:00.1Z", newer.ID)
+	require.NoError(t, err)
+
+	candidates, err := db.FindReusableSessionCandidates(
+		repo.ID, base.Branch, base.Agent, base.ReviewType, "", 2,
+	)
+	require.NoError(t, err)
+	require.Len(t, candidates, 2)
+	assert.Equal(t, newer.ID, candidates[0].ID)
+	assert.Equal(t, older.ID, candidates[1].ID)
+}
+
 func TestFindReusableSessionCandidatesIncludesRangeReviewJobs(t *testing.T) {
 	assert := assert.New(t)
 	db := openTestDB(t)

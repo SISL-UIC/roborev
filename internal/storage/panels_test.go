@@ -830,12 +830,30 @@ type failingExecer struct {
 	failAt int
 }
 
-func (f *failingExecer) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
+func (f *failingExecer) failNext() error {
 	f.calls++
 	if f.calls == f.failAt {
-		return nil, errors.New("injected insert failure")
+		return errors.New("injected insert failure")
+	}
+	return nil
+}
+
+func (f *failingExecer) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
+	if err := f.failNext(); err != nil {
+		return nil, err
 	}
 	return f.inner.ExecContext(ctx, query, args...)
+}
+
+func (f *failingExecer) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
+	if err := f.failNext(); err != nil {
+		return nil, err
+	}
+	return f.inner.QueryContext(ctx, query, args...)
+}
+
+func (f *failingExecer) QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row {
+	return f.inner.QueryRowContext(ctx, query, args...)
 }
 
 func TestEnqueuePanelRunRollback(t *testing.T) {
