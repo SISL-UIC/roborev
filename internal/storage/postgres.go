@@ -715,73 +715,81 @@ func (p *PgPool) UpsertJob(ctx context.Context, j SyncableJob, pgRepoID int64, p
 	if err != nil {
 		return err
 	}
-	_, err = p.pool.Exec(ctx, `
-		INSERT INTO review_jobs (
-			uuid, repo_id, commit_id, git_ref, session_id, agent, model, provider, requested_model, requested_provider, reasoning, job_type, review_type, patch_id, status, agentic,
-			enqueued_at, started_at, finished_at, prompt, diff_content, dirty_files, error, token_usage,
-			worktree_path, source, min_severity,
-			panel_run_uuid, panel_role, panel_name, panel_member_name, panel_member_index, panel_member_config_json,
-			source_machine_id, backup_agent, backup_model, agent_invoked, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, clock_timestamp())
-		ON CONFLICT (uuid) DO UPDATE SET
-			status = EXCLUDED.status,
-			finished_at = EXCLUDED.finished_at,
-			error = EXCLUDED.error,
-			model = EXCLUDED.model,
-			provider = EXCLUDED.provider,
-			requested_model = EXCLUDED.requested_model,
-			requested_provider = EXCLUDED.requested_provider,
-			git_ref = EXCLUDED.git_ref,
-			session_id = CASE WHEN EXCLUDED.status IN ('done', 'failed', 'canceled', 'skipped', 'applied', 'rebased') THEN EXCLUDED.session_id ELSE COALESCE(EXCLUDED.session_id, review_jobs.session_id) END,
-			commit_id = EXCLUDED.commit_id,
-			patch_id = EXCLUDED.patch_id,
-			dirty_files = COALESCE(EXCLUDED.dirty_files, review_jobs.dirty_files),
-			token_usage = CASE WHEN EXCLUDED.status IN ('done', 'failed', 'canceled', 'skipped', 'applied', 'rebased') THEN EXCLUDED.token_usage ELSE COALESCE(EXCLUDED.token_usage, review_jobs.token_usage) END,
-			agent_invoked = CASE WHEN EXCLUDED.status IN ('done', 'failed', 'canceled', 'skipped', 'applied', 'rebased') THEN EXCLUDED.agent_invoked ELSE (review_jobs.agent_invoked OR EXCLUDED.agent_invoked) END,
-			worktree_path = COALESCE(EXCLUDED.worktree_path, review_jobs.worktree_path),
-			source = COALESCE(EXCLUDED.source, review_jobs.source),
-			min_severity = EXCLUDED.min_severity,
-			backup_agent = EXCLUDED.backup_agent,
-			backup_model = EXCLUDED.backup_model,
-			panel_run_uuid = EXCLUDED.panel_run_uuid,
-			panel_role = EXCLUDED.panel_role,
-			panel_name = EXCLUDED.panel_name,
-			panel_member_name = EXCLUDED.panel_member_name,
-			panel_member_index = EXCLUDED.panel_member_index,
-			panel_member_config_json = EXCLUDED.panel_member_config_json,
-			updated_at = clock_timestamp()
-	`, j.UUID, pgRepoID, pgCommitID, j.GitRef, nullString(j.SessionID), j.Agent, nullString(j.Model), nullString(j.Provider), nullString(j.RequestedModel), nullString(j.RequestedProvider), nullString(j.Reasoning),
-		defaultStr(j.JobType, "review"), j.ReviewType, nullString(j.PatchID), j.Status, j.Agentic, j.EnqueuedAt, j.StartedAt, j.FinishedAt,
-		nullString(j.Prompt), j.DiffContent, nullString(dirtyFilesJSON), nullString(j.Error), nullString(j.TokenUsage), nullString(j.WorktreePath), nullString(j.Source), normalizeMinSeverityForWrite(j.MinSeverity),
-		nullString(j.PanelRunUUID), nullString(j.PanelRole), nullString(j.PanelName), nullString(j.PanelMemberName), j.PanelMemberIndex, nullString(j.PanelMemberConfigJSON),
-		j.SourceMachineID, j.BackupAgent, j.BackupModel, j.AgentInvoked)
+	panelMemberIndex := j.PanelMemberIndex
+	row := jobRow{
+		UUID: optionalString(j.UUID), RepoID: pgRepoID, CommitID: pgCommitID, GitRef: j.GitRef,
+		SessionID: optionalString(j.SessionID), Agent: j.Agent, Model: optionalString(j.Model),
+		Provider: optionalString(j.Provider), RequestedModel: optionalString(j.RequestedModel),
+		RequestedProvider: optionalString(j.RequestedProvider), Reasoning: optionalString(j.Reasoning),
+		JobType: defaultStr(j.JobType, "review"), ReviewType: j.ReviewType, PatchID: optionalString(j.PatchID),
+		Status: JobStatus(j.Status), Agentic: j.Agentic, AgentInvoked: j.AgentInvoked,
+		EnqueuedAt: dbTimeFromValue(j.EnqueuedAt), StartedAt: dbTimeFromPointer(j.StartedAt),
+		FinishedAt: dbTimeFromPointer(j.FinishedAt), Prompt: optionalString(j.Prompt),
+		DiffContent: cloneStringPointer(j.DiffContent), DirtyFiles: optionalString(dirtyFilesJSON),
+		Error: optionalString(j.Error), TokenUsage: optionalString(j.TokenUsage),
+		WorktreePath: optionalString(j.WorktreePath), Source: optionalString(j.Source),
+		MinSeverity: normalizeMinSeverityForWrite(j.MinSeverity), BackupAgent: j.BackupAgent, BackupModel: j.BackupModel,
+		PanelRunUUID: optionalString(j.PanelRunUUID), PanelRole: optionalString(j.PanelRole),
+		PanelName: optionalString(j.PanelName), PanelMemberName: optionalString(j.PanelMemberName),
+		PanelMemberIndex: &panelMemberIndex, PanelMemberConfigJSON: optionalString(j.PanelMemberConfigJSON),
+		SourceMachineID: optionalString(j.SourceMachineID),
+	}
+	_, err = p.bun.NewInsert().Model(&row).
+		Column("uuid", "repo_id", "commit_id", "git_ref", "session_id", "agent", "model", "provider",
+			"requested_model", "requested_provider", "reasoning", "job_type", "review_type", "patch_id",
+			"status", "agentic", "enqueued_at", "started_at", "finished_at", "prompt", "diff_content",
+			"dirty_files", "error", "token_usage", "worktree_path", "source", "min_severity", "panel_run_uuid",
+			"panel_role", "panel_name", "panel_member_name", "panel_member_index", "panel_member_config_json",
+			"source_machine_id", "backup_agent", "backup_model", "agent_invoked").
+		Value("updated_at", "clock_timestamp()").
+		On("CONFLICT (uuid) DO UPDATE").
+		Set("status = EXCLUDED.status").Set("finished_at = EXCLUDED.finished_at").
+		Set("error = EXCLUDED.error").Set("model = EXCLUDED.model").Set("provider = EXCLUDED.provider").
+		Set("requested_model = EXCLUDED.requested_model").Set("requested_provider = EXCLUDED.requested_provider").
+		Set("git_ref = EXCLUDED.git_ref").
+		Set("session_id = CASE WHEN EXCLUDED.status IN ('done', 'failed', 'canceled', 'skipped', 'applied', 'rebased') THEN EXCLUDED.session_id ELSE COALESCE(EXCLUDED.session_id, review_jobs.session_id) END").
+		Set("commit_id = EXCLUDED.commit_id").Set("patch_id = EXCLUDED.patch_id").
+		Set("dirty_files = COALESCE(EXCLUDED.dirty_files, review_jobs.dirty_files)").
+		Set("token_usage = CASE WHEN EXCLUDED.status IN ('done', 'failed', 'canceled', 'skipped', 'applied', 'rebased') THEN EXCLUDED.token_usage ELSE COALESCE(EXCLUDED.token_usage, review_jobs.token_usage) END").
+		Set("agent_invoked = CASE WHEN EXCLUDED.status IN ('done', 'failed', 'canceled', 'skipped', 'applied', 'rebased') THEN EXCLUDED.agent_invoked ELSE (review_jobs.agent_invoked OR EXCLUDED.agent_invoked) END").
+		Set("worktree_path = COALESCE(EXCLUDED.worktree_path, review_jobs.worktree_path)").
+		Set("source = COALESCE(EXCLUDED.source, review_jobs.source)").
+		Set("min_severity = EXCLUDED.min_severity").Set("backup_agent = EXCLUDED.backup_agent").
+		Set("backup_model = EXCLUDED.backup_model").Set("panel_run_uuid = EXCLUDED.panel_run_uuid").
+		Set("panel_role = EXCLUDED.panel_role").Set("panel_name = EXCLUDED.panel_name").
+		Set("panel_member_name = EXCLUDED.panel_member_name").
+		Set("panel_member_index = EXCLUDED.panel_member_index").
+		Set("panel_member_config_json = EXCLUDED.panel_member_config_json").
+		Set("updated_at = clock_timestamp()").Exec(ctx)
 	return err
 }
 
 // UpsertReview inserts or updates a review in PostgreSQL
 func (p *PgPool) UpsertReview(ctx context.Context, r SyncableReview) error {
-	_, err := p.pool.Exec(ctx, `
-		INSERT INTO reviews (
-			uuid, job_uuid, agent, prompt, output, closed,
-			updated_by_machine_id, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, clock_timestamp())
-		ON CONFLICT (uuid) DO UPDATE SET
-			closed = EXCLUDED.closed,
-			updated_by_machine_id = EXCLUDED.updated_by_machine_id,
-			updated_at = clock_timestamp()
-	`, r.UUID, r.JobUUID, r.Agent, r.Prompt, r.Output, r.Closed,
-		r.UpdatedByMachineID, r.CreatedAt)
+	row := reviewRow{
+		UUID: &r.UUID, JobUUID: &r.JobUUID, Agent: r.Agent, Prompt: r.Prompt,
+		Output: r.Output, Closed: r.Closed, UpdatedByMachineID: &r.UpdatedByMachineID,
+		CreatedAt: dbTimeFromValue(r.CreatedAt),
+	}
+	_, err := p.bun.NewInsert().Model(&row).
+		Column("uuid", "job_uuid", "agent", "prompt", "output", "closed", "updated_by_machine_id", "created_at").
+		Value("updated_at", "clock_timestamp()").
+		On("CONFLICT (uuid) DO UPDATE").
+		Set("closed = EXCLUDED.closed").
+		Set("updated_by_machine_id = EXCLUDED.updated_by_machine_id").
+		Set("updated_at = clock_timestamp()").Exec(ctx)
 	return err
 }
 
 // InsertResponse inserts a response in PostgreSQL (append-only, no updates)
 func (p *PgPool) InsertResponse(ctx context.Context, r SyncableResponse) error {
-	_, err := p.pool.Exec(ctx, `
-		INSERT INTO responses (
-			uuid, job_uuid, responder, response, source_machine_id, created_at
-		) VALUES ($1, $2, $3, $4, $5, $6)
-		ON CONFLICT (uuid) DO NOTHING
-	`, r.UUID, r.JobUUID, r.Responder, r.Response, r.SourceMachineID, r.CreatedAt)
+	row := responseRow{
+		UUID: &r.UUID, JobUUID: &r.JobUUID, Responder: r.Responder, Response: r.Response,
+		SourceMachineID: &r.SourceMachineID, CreatedAt: dbTimeFromValue(r.CreatedAt),
+	}
+	_, err := p.bun.NewInsert().Model(&row).
+		Column("uuid", "job_uuid", "responder", "response", "source_machine_id", "created_at").
+		On("CONFLICT (uuid) DO NOTHING").Exec(ctx)
 	return err
 }
 
