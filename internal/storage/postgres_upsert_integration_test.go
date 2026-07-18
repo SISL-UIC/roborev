@@ -70,7 +70,7 @@ func TestIntegration_SingleReviewAndResponseUpserts(t *testing.T) {
 		assert.Equal(t, "original output", output)
 		assert.False(t, closed)
 		assert.Equal(t, machineID, updatedBy)
-		assert.Equal(t, createdAt, storedCreatedAt)
+		assert.True(t, storedCreatedAt.Equal(createdAt))
 		assert.False(t, firstUpdatedAt.IsZero())
 
 		review.Agent = "replacement-agent"
@@ -94,7 +94,7 @@ func TestIntegration_SingleReviewAndResponseUpserts(t *testing.T) {
 		assert.Equal(t, "original output", output)
 		assert.True(t, closed)
 		assert.Equal(t, otherMachineID, updatedBy)
-		assert.Equal(t, createdAt, storedCreatedAt)
+		assert.True(t, storedCreatedAt.Equal(createdAt))
 		assert.False(t, secondUpdatedAt.Before(firstUpdatedAt))
 	})
 
@@ -134,7 +134,7 @@ func TestIntegration_SingleReviewAndResponseUpserts(t *testing.T) {
 		assert.Equal(t, "human", responder)
 		assert.Equal(t, "original response", body)
 		assert.Equal(t, machineID, sourceMachineID)
-		assert.Equal(t, createdAt, storedCreatedAt)
+		assert.True(t, storedCreatedAt.Equal(createdAt))
 		assert.False(t, insertedAt.IsZero())
 		assert.Equal(t, 1, count)
 	})

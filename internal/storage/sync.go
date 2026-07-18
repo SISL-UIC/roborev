@@ -390,89 +390,149 @@ type SyncableJob struct {
 	FinishedAtRaw         string
 }
 
+type syncableJobRow struct {
+	ID                    int64   `bun:"id"`
+	UUID                  string  `bun:"uuid"`
+	RepoID                int64   `bun:"repo_id"`
+	RepoIdentity          string  `bun:"repo_identity"`
+	CommitID              *int64  `bun:"commit_id"`
+	CommitSHA             string  `bun:"commit_sha"`
+	CommitAuthor          string  `bun:"commit_author"`
+	CommitSubject         string  `bun:"commit_subject"`
+	CommitTimestampRaw    string  `bun:"commit_timestamp_raw"`
+	GitRef                string  `bun:"git_ref"`
+	SessionID             string  `bun:"session_id"`
+	Agent                 string  `bun:"agent"`
+	Model                 string  `bun:"model"`
+	Provider              string  `bun:"provider"`
+	RequestedModel        string  `bun:"requested_model"`
+	RequestedProvider     string  `bun:"requested_provider"`
+	Reasoning             string  `bun:"reasoning"`
+	JobType               string  `bun:"job_type"`
+	ReviewType            string  `bun:"review_type"`
+	PatchID               string  `bun:"patch_id"`
+	Status                string  `bun:"status"`
+	Agentic               bool    `bun:"agentic"`
+	AgentInvoked          bool    `bun:"agent_invoked"`
+	EnqueuedAtRaw         string  `bun:"enqueued_at_raw"`
+	StartedAtRaw          string  `bun:"started_at_raw"`
+	FinishedAtRaw         string  `bun:"finished_at_raw"`
+	Prompt                string  `bun:"prompt"`
+	DiffContent           *string `bun:"diff_content"`
+	DirtyFiles            *string `bun:"dirty_files"`
+	Error                 string  `bun:"error"`
+	TokenUsage            string  `bun:"token_usage"`
+	WorktreePath          string  `bun:"worktree_path"`
+	Source                string  `bun:"source"`
+	MinSeverity           string  `bun:"min_severity"`
+	BackupAgent           string  `bun:"backup_agent"`
+	BackupModel           string  `bun:"backup_model"`
+	PanelRunUUID          string  `bun:"panel_run_uuid"`
+	PanelRole             string  `bun:"panel_role"`
+	PanelName             string  `bun:"panel_name"`
+	PanelMemberName       string  `bun:"panel_member_name"`
+	PanelMemberIndex      int     `bun:"panel_member_index"`
+	PanelMemberConfigJSON string  `bun:"panel_member_config_json"`
+	SourceMachineID       string  `bun:"source_machine_id"`
+	UpdatedAtRaw          string  `bun:"updated_at_raw"`
+}
+
+func (row syncableJobRow) toModel() SyncableJob {
+	job := SyncableJob{
+		ID: row.ID, UUID: row.UUID, RepoID: row.RepoID, RepoIdentity: row.RepoIdentity,
+		CommitID: cloneInt64Pointer(row.CommitID), CommitSHA: row.CommitSHA,
+		CommitAuthor: row.CommitAuthor, CommitSubject: row.CommitSubject,
+		GitRef: row.GitRef, SessionID: row.SessionID, Agent: row.Agent, Model: row.Model,
+		Provider: row.Provider, RequestedModel: row.RequestedModel,
+		RequestedProvider: row.RequestedProvider, Reasoning: row.Reasoning,
+		JobType: row.JobType, ReviewType: row.ReviewType, PatchID: row.PatchID,
+		Status: row.Status, Agentic: row.Agentic, AgentInvoked: row.AgentInvoked,
+		EnqueuedAt: parseSQLiteTime(row.EnqueuedAtRaw), Prompt: row.Prompt,
+		DiffContent: cloneStringPointer(row.DiffContent), Error: row.Error,
+		TokenUsage: row.TokenUsage, WorktreePath: row.WorktreePath, Source: row.Source,
+		MinSeverity: row.MinSeverity, BackupAgent: row.BackupAgent, BackupModel: row.BackupModel,
+		PanelRunUUID: row.PanelRunUUID, PanelRole: row.PanelRole, PanelName: row.PanelName,
+		PanelMemberName: row.PanelMemberName, PanelMemberIndex: row.PanelMemberIndex,
+		PanelMemberConfigJSON: row.PanelMemberConfigJSON, SourceMachineID: row.SourceMachineID,
+		UpdatedAt: parseSQLiteTime(row.UpdatedAtRaw), UpdatedAtRaw: row.UpdatedAtRaw,
+		StartedAtRaw: row.StartedAtRaw, FinishedAtRaw: row.FinishedAtRaw,
+	}
+	if row.CommitTimestampRaw != "" {
+		job.CommitTimestamp = parseSQLiteTime(row.CommitTimestampRaw)
+	}
+	if row.StartedAtRaw != "" {
+		startedAt := parseSQLiteTime(row.StartedAtRaw)
+		if !startedAt.IsZero() {
+			job.StartedAt = &startedAt
+		}
+	}
+	if row.FinishedAtRaw != "" {
+		finishedAt := parseSQLiteTime(row.FinishedAtRaw)
+		if !finishedAt.IsZero() {
+			job.FinishedAt = &finishedAt
+		}
+	}
+	if row.DirtyFiles != nil {
+		job.DirtyFiles = decodeDirtyFiles(*row.DirtyFiles)
+	}
+	return job
+}
+
 // GetJobsToSync returns terminal jobs that need to be pushed to PostgreSQL.
 // These are jobs created locally that haven't been synced or were updated since last sync.
 func (db *DB) GetJobsToSync(machineID string, limit int) ([]SyncableJob, error) {
-	rows, err := db.Query(`
-		SELECT
-			j.id, j.uuid, j.repo_id, COALESCE(r.identity, ''),
-			j.commit_id, COALESCE(c.sha, ''), COALESCE(c.author, ''), COALESCE(c.subject, ''), COALESCE(c.timestamp, ''),
-			j.git_ref, COALESCE(j.session_id, ''), j.agent, COALESCE(j.model, ''), COALESCE(j.provider, ''), COALESCE(j.requested_model, ''), COALESCE(j.requested_provider, ''), COALESCE(j.reasoning, ''), COALESCE(j.job_type, 'review'), COALESCE(j.review_type, ''), COALESCE(j.patch_id, ''), j.status, j.agentic, j.agent_invoked,
-			j.enqueued_at, COALESCE(j.started_at, ''), COALESCE(j.finished_at, ''),
-			COALESCE(j.prompt, ''), j.diff_content, j.dirty_files, COALESCE(j.error, ''), COALESCE(j.token_usage, ''),
-			COALESCE(j.worktree_path, ''), COALESCE(j.source, ''), COALESCE(j.min_severity, ''), COALESCE(j.backup_agent, ''), COALESCE(j.backup_model, ''),
-			COALESCE(j.panel_run_uuid, ''), COALESCE(j.panel_role, ''), COALESCE(j.panel_name, ''), COALESCE(j.panel_member_name, ''), COALESCE(j.panel_member_index, 0), COALESCE(j.panel_member_config_json, ''),
-			j.source_machine_id, j.updated_at
-		FROM review_jobs j
-		JOIN repos r ON j.repo_id = r.id
-		LEFT JOIN commits c ON j.commit_id = c.id
-		WHERE j.status IN ('done', 'failed', 'canceled', 'skipped')
-		AND j.source_machine_id = ?
-		AND j.uuid IS NOT NULL
-		AND (j.synced_at IS NULL OR `+sqliteNormalizedTimestampExpr("j.updated_at")+` > `+sqliteNormalizedTimestampExpr("j.synced_at")+`)
-		ORDER BY j.id
-		LIMIT ?
-	`, machineID, limit)
+	if limit <= 0 {
+		return nil, nil
+	}
+	var rows []syncableJobRow
+	err := db.bun.NewSelect().TableExpr("review_jobs AS j").
+		ColumnExpr("j.id AS id").ColumnExpr("j.uuid AS uuid").ColumnExpr("j.repo_id AS repo_id").
+		ColumnExpr("COALESCE(r.identity, '') AS repo_identity").ColumnExpr("j.commit_id AS commit_id").
+		ColumnExpr("COALESCE(c.sha, '') AS commit_sha").ColumnExpr("COALESCE(c.author, '') AS commit_author").
+		ColumnExpr("COALESCE(c.subject, '') AS commit_subject").
+		ColumnExpr("COALESCE(c.timestamp, '') AS commit_timestamp_raw").
+		ColumnExpr("j.git_ref AS git_ref").ColumnExpr("COALESCE(j.session_id, '') AS session_id").
+		ColumnExpr("j.agent AS agent").ColumnExpr("COALESCE(j.model, '') AS model").
+		ColumnExpr("COALESCE(j.provider, '') AS provider").
+		ColumnExpr("COALESCE(j.requested_model, '') AS requested_model").
+		ColumnExpr("COALESCE(j.requested_provider, '') AS requested_provider").
+		ColumnExpr("COALESCE(j.reasoning, '') AS reasoning").
+		ColumnExpr("COALESCE(j.job_type, 'review') AS job_type").
+		ColumnExpr("COALESCE(j.review_type, '') AS review_type").
+		ColumnExpr("COALESCE(j.patch_id, '') AS patch_id").ColumnExpr("j.status AS status").
+		ColumnExpr("j.agentic AS agentic").ColumnExpr("j.agent_invoked AS agent_invoked").
+		ColumnExpr("j.enqueued_at AS enqueued_at_raw").
+		ColumnExpr("COALESCE(j.started_at, '') AS started_at_raw").
+		ColumnExpr("COALESCE(j.finished_at, '') AS finished_at_raw").
+		ColumnExpr("COALESCE(j.prompt, '') AS prompt").ColumnExpr("j.diff_content AS diff_content").
+		ColumnExpr("j.dirty_files AS dirty_files").ColumnExpr("COALESCE(j.error, '') AS error").
+		ColumnExpr("COALESCE(j.token_usage, '') AS token_usage").
+		ColumnExpr("COALESCE(j.worktree_path, '') AS worktree_path").
+		ColumnExpr("COALESCE(j.source, '') AS source").
+		ColumnExpr("COALESCE(j.min_severity, '') AS min_severity").
+		ColumnExpr("COALESCE(j.backup_agent, '') AS backup_agent").
+		ColumnExpr("COALESCE(j.backup_model, '') AS backup_model").
+		ColumnExpr("COALESCE(j.panel_run_uuid, '') AS panel_run_uuid").
+		ColumnExpr("COALESCE(j.panel_role, '') AS panel_role").
+		ColumnExpr("COALESCE(j.panel_name, '') AS panel_name").
+		ColumnExpr("COALESCE(j.panel_member_name, '') AS panel_member_name").
+		ColumnExpr("COALESCE(j.panel_member_index, 0) AS panel_member_index").
+		ColumnExpr("COALESCE(j.panel_member_config_json, '') AS panel_member_config_json").
+		ColumnExpr("j.source_machine_id AS source_machine_id").ColumnExpr("j.updated_at AS updated_at_raw").
+		Join("JOIN repos AS r ON j.repo_id = r.id").Join("LEFT JOIN commits AS c ON j.commit_id = c.id").
+		Where("j.status IN ('done', 'failed', 'canceled', 'skipped')").
+		Where("j.source_machine_id = ?", machineID).Where("j.uuid IS NOT NULL").
+		Where("j.synced_at IS NULL OR "+sqliteNormalizedTimestampExpr("j.updated_at")+" > "+sqliteNormalizedTimestampExpr("j.synced_at")).
+		OrderExpr("j.id").Limit(limit).Scan(context.Background(), &rows)
 	if err != nil {
 		return nil, fmt.Errorf("query jobs to sync: %w", err)
 	}
-	defer rows.Close()
 
 	var jobs []SyncableJob
-	for rows.Next() {
-		var j SyncableJob
-		var enqueuedAt, startedAt, finishedAt, commitTimestamp, updatedAt string
-		var commitID sql.NullInt64
-		var diffContent sql.NullString
-		var dirtyFiles sql.NullString
-
-		err := rows.Scan(
-			&j.ID, &j.UUID, &j.RepoID, &j.RepoIdentity,
-			&commitID, &j.CommitSHA, &j.CommitAuthor, &j.CommitSubject, &commitTimestamp,
-			&j.GitRef, &j.SessionID, &j.Agent, &j.Model, &j.Provider, &j.RequestedModel, &j.RequestedProvider, &j.Reasoning, &j.JobType, &j.ReviewType, &j.PatchID, &j.Status, &j.Agentic, &j.AgentInvoked,
-			&enqueuedAt, &startedAt, &finishedAt,
-			&j.Prompt, &diffContent, &dirtyFiles, &j.Error, &j.TokenUsage,
-			&j.WorktreePath, &j.Source, &j.MinSeverity, &j.BackupAgent, &j.BackupModel,
-			&j.PanelRunUUID, &j.PanelRole, &j.PanelName, &j.PanelMemberName, &j.PanelMemberIndex, &j.PanelMemberConfigJSON,
-			&j.SourceMachineID, &updatedAt,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("scan job: %w", err)
-		}
-
-		if commitID.Valid {
-			j.CommitID = &commitID.Int64
-		}
-		if diffContent.Valid {
-			j.DiffContent = &diffContent.String
-		}
-		if dirtyFiles.Valid {
-			j.DirtyFiles = decodeDirtyFiles(dirtyFiles.String)
-		}
-		j.EnqueuedAt = parseSQLiteTime(enqueuedAt)
-		if startedAt != "" {
-			t := parseSQLiteTime(startedAt)
-			if !t.IsZero() {
-				j.StartedAt = &t
-			}
-		}
-		j.StartedAtRaw = startedAt
-		if finishedAt != "" {
-			t := parseSQLiteTime(finishedAt)
-			if !t.IsZero() {
-				j.FinishedAt = &t
-			}
-		}
-		j.FinishedAtRaw = finishedAt
-		if commitTimestamp != "" {
-			j.CommitTimestamp = parseSQLiteTime(commitTimestamp)
-		}
-		j.UpdatedAt = parseSQLiteTime(updatedAt)
-		j.UpdatedAtRaw = updatedAt
-
-		jobs = append(jobs, j)
+	for _, row := range rows {
+		jobs = append(jobs, row.toModel())
 	}
-	return jobs, rows.Err()
+	return jobs, nil
 }
 
 // MarkJobSynced updates the synced_at timestamp for a job
@@ -590,48 +650,52 @@ type SyncableReview struct {
 	UpdatedAt          time.Time
 }
 
+type syncableReviewRow struct {
+	ID                 int64  `bun:"id"`
+	UUID               string `bun:"uuid"`
+	JobID              int64  `bun:"job_id"`
+	JobUUID            string `bun:"job_uuid"`
+	Agent              string `bun:"agent"`
+	Prompt             string `bun:"prompt"`
+	Output             string `bun:"output"`
+	Closed             bool   `bun:"closed"`
+	UpdatedByMachineID string `bun:"updated_by_machine_id"`
+	CreatedAtRaw       string `bun:"created_at_raw"`
+	UpdatedAtRaw       string `bun:"updated_at_raw"`
+}
+
 // GetReviewsToSync returns reviews modified locally that need to be pushed.
 // Only returns reviews whose parent job has already been synced.
 func (db *DB) GetReviewsToSync(machineID string, limit int) ([]SyncableReview, error) {
-	rows, err := db.Query(`
-		SELECT
-			r.id, r.uuid, r.job_id, j.uuid,
-			r.agent, r.prompt, r.output, r.closed,
-			r.updated_by_machine_id, r.created_at, r.updated_at
-		FROM reviews r
-		JOIN review_jobs j ON r.job_id = j.id
-		WHERE r.updated_by_machine_id = ?
-		AND r.uuid IS NOT NULL
-		AND j.uuid IS NOT NULL
-		AND j.synced_at IS NOT NULL
-		AND (r.synced_at IS NULL OR `+sqliteNormalizedTimestampExpr("r.updated_at")+` > `+sqliteNormalizedTimestampExpr("r.synced_at")+`)
-		ORDER BY r.id
-		LIMIT ?
-	`, machineID, limit)
+	if limit <= 0 {
+		return nil, nil
+	}
+	var rows []syncableReviewRow
+	err := db.bun.NewSelect().TableExpr("reviews AS r").
+		ColumnExpr("r.id AS id").ColumnExpr("r.uuid AS uuid").ColumnExpr("r.job_id AS job_id").
+		ColumnExpr("j.uuid AS job_uuid").ColumnExpr("r.agent AS agent").
+		ColumnExpr("r.prompt AS prompt").ColumnExpr("r.output AS output").ColumnExpr("r.closed AS closed").
+		ColumnExpr("r.updated_by_machine_id AS updated_by_machine_id").
+		ColumnExpr("r.created_at AS created_at_raw").ColumnExpr("r.updated_at AS updated_at_raw").
+		Join("JOIN review_jobs AS j ON r.job_id = j.id").
+		Where("r.updated_by_machine_id = ?", machineID).Where("r.uuid IS NOT NULL").
+		Where("j.uuid IS NOT NULL").Where("j.synced_at IS NOT NULL").
+		Where("r.synced_at IS NULL OR "+sqliteNormalizedTimestampExpr("r.updated_at")+" > "+sqliteNormalizedTimestampExpr("r.synced_at")).
+		OrderExpr("r.id").Limit(limit).Scan(context.Background(), &rows)
 	if err != nil {
 		return nil, fmt.Errorf("query reviews to sync: %w", err)
 	}
-	defer rows.Close()
 
 	var reviews []SyncableReview
-	for rows.Next() {
-		var r SyncableReview
-		var createdAt, updatedAt string
-
-		err := rows.Scan(
-			&r.ID, &r.UUID, &r.JobID, &r.JobUUID,
-			&r.Agent, &r.Prompt, &r.Output, &r.Closed,
-			&r.UpdatedByMachineID, &createdAt, &updatedAt,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("scan review: %w", err)
-		}
-
-		r.CreatedAt = parseSQLiteTime(createdAt)
-		r.UpdatedAt = parseSQLiteTime(updatedAt)
-		reviews = append(reviews, r)
+	for _, row := range rows {
+		reviews = append(reviews, SyncableReview{
+			ID: row.ID, UUID: row.UUID, JobID: row.JobID, JobUUID: row.JobUUID,
+			Agent: row.Agent, Prompt: row.Prompt, Output: row.Output, Closed: row.Closed,
+			UpdatedByMachineID: row.UpdatedByMachineID,
+			CreatedAt:          parseSQLiteTime(row.CreatedAtRaw), UpdatedAt: parseSQLiteTime(row.UpdatedAtRaw),
+		})
 	}
-	return reviews, rows.Err()
+	return reviews, nil
 }
 
 // MarkReviewSynced updates the synced_at timestamp for a review
@@ -665,49 +729,50 @@ type SyncableResponse struct {
 	CreatedAt       time.Time
 }
 
+type syncableResponseRow struct {
+	ID              int64  `bun:"id"`
+	UUID            string `bun:"uuid"`
+	JobID           *int64 `bun:"job_id"`
+	JobUUID         string `bun:"job_uuid"`
+	Responder       string `bun:"responder"`
+	Response        string `bun:"response"`
+	SourceMachineID string `bun:"source_machine_id"`
+	CreatedAtRaw    string `bun:"created_at_raw"`
+}
+
 // GetCommentsToSync returns comments created locally that need to be pushed.
 // Only returns comments whose parent job has already been synced.
 func (db *DB) GetCommentsToSync(machineID string, limit int) ([]SyncableResponse, error) {
-	rows, err := db.Query(`
-		SELECT
-			r.id, r.uuid, r.job_id, j.uuid,
-			r.responder, r.response, r.source_machine_id, r.created_at
-		FROM responses r
-		JOIN review_jobs j ON r.job_id = j.id
-		WHERE r.source_machine_id = ?
-		AND r.uuid IS NOT NULL
-		AND j.uuid IS NOT NULL
-		AND r.synced_at IS NULL
-		AND j.synced_at IS NOT NULL
-		ORDER BY r.id
-		LIMIT ?
-	`, machineID, limit)
+	if limit <= 0 {
+		return nil, nil
+	}
+	var rows []syncableResponseRow
+	err := db.bun.NewSelect().TableExpr("responses AS r").
+		ColumnExpr("r.id AS id").ColumnExpr("r.uuid AS uuid").ColumnExpr("r.job_id AS job_id").
+		ColumnExpr("j.uuid AS job_uuid").ColumnExpr("r.responder AS responder").
+		ColumnExpr("r.response AS response").ColumnExpr("r.source_machine_id AS source_machine_id").
+		ColumnExpr("r.created_at AS created_at_raw").
+		Join("JOIN review_jobs AS j ON r.job_id = j.id").
+		Where("r.source_machine_id = ?", machineID).Where("r.uuid IS NOT NULL").
+		Where("j.uuid IS NOT NULL").Where("r.synced_at IS NULL").Where("j.synced_at IS NOT NULL").
+		OrderExpr("r.id").Limit(limit).Scan(context.Background(), &rows)
 	if err != nil {
 		return nil, fmt.Errorf("query responses to sync: %w", err)
 	}
-	defer rows.Close()
 
 	var responses []SyncableResponse
-	for rows.Next() {
-		var r SyncableResponse
-		var createdAt string
-		var jobID sql.NullInt64
-
-		err := rows.Scan(
-			&r.ID, &r.UUID, &jobID, &r.JobUUID,
-			&r.Responder, &r.Response, &r.SourceMachineID, &createdAt,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("scan response: %w", err)
+	for _, row := range rows {
+		response := SyncableResponse{
+			ID: row.ID, UUID: row.UUID, JobUUID: row.JobUUID, Responder: row.Responder,
+			Response: row.Response, SourceMachineID: row.SourceMachineID,
+			CreatedAt: parseSQLiteTime(row.CreatedAtRaw),
 		}
-
-		if jobID.Valid {
-			r.JobID = jobID.Int64
+		if row.JobID != nil {
+			response.JobID = *row.JobID
 		}
-		r.CreatedAt = parseSQLiteTime(createdAt)
-		responses = append(responses, r)
+		responses = append(responses, response)
 	}
-	return responses, rows.Err()
+	return responses, nil
 }
 
 // MarkCommentSynced updates the synced_at timestamp for a comment
@@ -732,56 +797,58 @@ func (db *DB) MarkCommentsSynced(responseIDs []int64) error {
 // UpsertPulledJob inserts or updates a job from PostgreSQL into SQLite.
 // Sets synced_at to prevent re-pushing. Requires repo to exist.
 func (db *DB) UpsertPulledJob(j PulledJob, repoID int64, commitID *int64) error {
-	now := time.Now().UTC().Format(time.RFC3339)
+	now := dbTimeFromValue(time.Now())
 	dirtyFilesJSON, err := encodeDirtyFiles(j.DirtyFiles)
 	if err != nil {
 		return err
 	}
-	_, err = db.Exec(`
-		INSERT INTO review_jobs (
-			uuid, repo_id, commit_id, git_ref, session_id, agent, model, provider, requested_model, requested_provider, reasoning, job_type, review_type, patch_id, status, agentic, agent_invoked,
-			enqueued_at, started_at, finished_at, prompt, diff_content, dirty_files, error, token_usage,
-			worktree_path, source, min_severity, backup_agent, backup_model,
-			panel_run_uuid, panel_role, panel_name, panel_member_name, panel_member_index, panel_member_config_json,
-			source_machine_id, updated_at, synced_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(uuid) DO UPDATE SET
-			status = excluded.status,
-			finished_at = excluded.finished_at,
-			error = excluded.error,
-			model = excluded.model,
-			provider = excluded.provider,
-			requested_model = excluded.requested_model,
-			requested_provider = excluded.requested_provider,
-			git_ref = excluded.git_ref,
-			session_id = CASE WHEN excluded.status IN ('done', 'failed', 'canceled', 'skipped', 'applied', 'rebased') THEN excluded.session_id ELSE COALESCE(excluded.session_id, review_jobs.session_id) END,
-			commit_id = excluded.commit_id,
-			patch_id = excluded.patch_id,
-			dirty_files = COALESCE(excluded.dirty_files, review_jobs.dirty_files),
-			token_usage = CASE WHEN excluded.status IN ('done', 'failed', 'canceled', 'skipped', 'applied', 'rebased') THEN excluded.token_usage ELSE COALESCE(excluded.token_usage, review_jobs.token_usage) END,
-			agent_invoked = CASE WHEN excluded.status IN ('done', 'failed', 'canceled', 'skipped', 'applied', 'rebased') THEN excluded.agent_invoked ELSE (review_jobs.agent_invoked OR excluded.agent_invoked) END,
-			worktree_path = COALESCE(excluded.worktree_path, review_jobs.worktree_path),
-			source = COALESCE(excluded.source, review_jobs.source),
-			min_severity = excluded.min_severity,
-			backup_agent = excluded.backup_agent,
-			backup_model = excluded.backup_model,
-			panel_run_uuid = excluded.panel_run_uuid,
-			panel_role = excluded.panel_role,
-			panel_name = excluded.panel_name,
-			panel_member_name = excluded.panel_member_name,
-			panel_member_index = excluded.panel_member_index,
-			panel_member_config_json = excluded.panel_member_config_json,
-			updated_at = excluded.updated_at,
-			synced_at = ?
-			WHERE review_jobs.status NOT IN ('applied', 'rebased')
-			OR `+sqliteNormalizedTimestampExpr("review_jobs.updated_at")+` < `+sqliteNormalizedTimestampExpr("excluded.updated_at")+`
-	`, j.UUID, repoID, commitID, j.GitRef, nullStr(j.SessionID), j.Agent, nullStr(j.Model), nullStr(j.Provider), nullStr(j.RequestedModel), nullStr(j.RequestedProvider), j.Reasoning, j.JobType,
-		j.ReviewType, nullStr(j.PatchID), j.Status, j.Agentic, j.AgentInvoked, j.EnqueuedAt.Format(time.RFC3339),
-		nullTimeStr(j.StartedAt), nullTimeStr(j.FinishedAt),
-		nullStr(j.Prompt), j.DiffContent, nullStr(dirtyFilesJSON), nullStr(j.Error), nullStr(j.TokenUsage),
-		nullStr(j.WorktreePath), nullStr(j.Source), normalizeMinSeverityForWrite(j.MinSeverity), j.BackupAgent, j.BackupModel,
-		nullStr(j.PanelRunUUID), nullStr(j.PanelRole), nullStr(j.PanelName), nullStr(j.PanelMemberName), j.PanelMemberIndex, nullStr(j.PanelMemberConfigJSON),
-		j.SourceMachineID, j.UpdatedAt.Format(time.RFC3339), now, now)
+	panelMemberIndex := j.PanelMemberIndex
+	reasoning := j.Reasoning
+	row := jobRow{
+		UUID: optionalString(j.UUID), RepoID: repoID, CommitID: commitID, GitRef: j.GitRef,
+		SessionID: optionalString(j.SessionID), Agent: j.Agent, Model: optionalString(j.Model),
+		Provider: optionalString(j.Provider), RequestedModel: optionalString(j.RequestedModel),
+		RequestedProvider: optionalString(j.RequestedProvider), Reasoning: &reasoning,
+		JobType: j.JobType, ReviewType: j.ReviewType, PatchID: optionalString(j.PatchID),
+		Status: JobStatus(j.Status), Agentic: j.Agentic, AgentInvoked: j.AgentInvoked,
+		EnqueuedAt: dbTimeFromValue(j.EnqueuedAt), StartedAt: dbTimeFromPointer(j.StartedAt),
+		FinishedAt: dbTimeFromPointer(j.FinishedAt), Prompt: optionalString(j.Prompt),
+		DiffContent: cloneStringPointer(j.DiffContent), DirtyFiles: optionalString(dirtyFilesJSON),
+		Error: optionalString(j.Error), TokenUsage: optionalString(j.TokenUsage),
+		WorktreePath: optionalString(j.WorktreePath), Source: optionalString(j.Source),
+		MinSeverity: normalizeMinSeverityForWrite(j.MinSeverity), BackupAgent: j.BackupAgent, BackupModel: j.BackupModel,
+		PanelRunUUID: optionalString(j.PanelRunUUID), PanelRole: optionalString(j.PanelRole),
+		PanelName: optionalString(j.PanelName), PanelMemberName: optionalString(j.PanelMemberName),
+		PanelMemberIndex: &panelMemberIndex, PanelMemberConfigJSON: optionalString(j.PanelMemberConfigJSON),
+		SourceMachineID: optionalString(j.SourceMachineID), UpdatedAt: dbTimeFromValue(j.UpdatedAt), SyncedAt: now,
+	}
+	_, err = db.bun.NewInsert().Model(&row).
+		Column("uuid", "repo_id", "commit_id", "git_ref", "session_id", "agent", "model", "provider",
+			"requested_model", "requested_provider", "reasoning", "job_type", "review_type", "patch_id", "status",
+			"agentic", "agent_invoked", "enqueued_at", "started_at", "finished_at", "prompt", "diff_content",
+			"dirty_files", "error", "token_usage", "worktree_path", "source", "min_severity", "backup_agent",
+			"backup_model", "panel_run_uuid", "panel_role", "panel_name", "panel_member_name", "panel_member_index",
+			"panel_member_config_json", "source_machine_id", "updated_at", "synced_at").
+		On("CONFLICT (uuid) DO UPDATE").Set("status = excluded.status").
+		Set("finished_at = excluded.finished_at").Set("error = excluded.error").
+		Set("model = excluded.model").Set("provider = excluded.provider").
+		Set("requested_model = excluded.requested_model").Set("requested_provider = excluded.requested_provider").
+		Set("git_ref = excluded.git_ref").
+		Set("session_id = CASE WHEN excluded.status IN ('done', 'failed', 'canceled', 'skipped', 'applied', 'rebased') THEN excluded.session_id ELSE COALESCE(excluded.session_id, j.session_id) END").
+		Set("commit_id = excluded.commit_id").Set("patch_id = excluded.patch_id").
+		Set("dirty_files = COALESCE(excluded.dirty_files, j.dirty_files)").
+		Set("token_usage = CASE WHEN excluded.status IN ('done', 'failed', 'canceled', 'skipped', 'applied', 'rebased') THEN excluded.token_usage ELSE COALESCE(excluded.token_usage, j.token_usage) END").
+		Set("agent_invoked = CASE WHEN excluded.status IN ('done', 'failed', 'canceled', 'skipped', 'applied', 'rebased') THEN excluded.agent_invoked ELSE (j.agent_invoked OR excluded.agent_invoked) END").
+		Set("worktree_path = COALESCE(excluded.worktree_path, j.worktree_path)").
+		Set("source = COALESCE(excluded.source, j.source)").Set("min_severity = excluded.min_severity").
+		Set("backup_agent = excluded.backup_agent").Set("backup_model = excluded.backup_model").
+		Set("panel_run_uuid = excluded.panel_run_uuid").Set("panel_role = excluded.panel_role").
+		Set("panel_name = excluded.panel_name").Set("panel_member_name = excluded.panel_member_name").
+		Set("panel_member_index = excluded.panel_member_index").
+		Set("panel_member_config_json = excluded.panel_member_config_json").
+		Set("updated_at = excluded.updated_at").Set("synced_at = ?", now).
+		Where("j.status NOT IN ('applied', 'rebased') OR " + sqliteNormalizedTimestampExpr("j.updated_at") + " < " + sqliteNormalizedTimestampExpr("excluded.updated_at")).
+		Exec(context.Background())
 	return err
 }
 
@@ -799,26 +866,26 @@ func (db *DB) UpsertPulledReview(r PulledReview) error {
 		return fmt.Errorf("find job for review: %w", err)
 	}
 
-	now := time.Now().UTC().Format(time.RFC3339)
-	var verdictBool any
+	now := dbTimeFromValue(time.Now())
+	var verdictBool *int
 	if r.Output != "" {
-		verdictBool = verdictToBool(ParseVerdict(r.Output))
+		verdict := verdictToBool(ParseVerdict(r.Output))
+		verdictBool = &verdict
 	}
-	_, err = db.Exec(`
-		INSERT INTO reviews (
-			uuid, job_id, agent, prompt, output, closed,
-			verdict_bool, updated_by_machine_id, created_at, updated_at, synced_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(uuid) DO UPDATE SET
-			closed = excluded.closed,
-			verdict_bool = COALESCE(reviews.verdict_bool, excluded.verdict_bool),
-			updated_by_machine_id = excluded.updated_by_machine_id,
-			updated_at = excluded.updated_at,
-			synced_at = ?
-			WHERE `+sqliteNormalizedTimestampExpr("reviews.updated_at")+` < `+sqliteNormalizedTimestampExpr("excluded.updated_at")+`
-	`, r.UUID, jobID, r.Agent, r.Prompt, r.Output, r.Closed,
-		verdictBool,
-		r.UpdatedByMachineID, r.CreatedAt.Format(time.RFC3339), r.UpdatedAt.Format(time.RFC3339), now, now)
+	row := reviewRow{
+		UUID: &r.UUID, JobID: &jobID, Agent: r.Agent, Prompt: r.Prompt, Output: r.Output,
+		Closed: r.Closed, VerdictBool: verdictBool, UpdatedByMachineID: &r.UpdatedByMachineID,
+		CreatedAt: dbTimeFromValue(r.CreatedAt), UpdatedAt: dbTimeFromValue(r.UpdatedAt), SyncedAt: now,
+	}
+	_, err = db.bun.NewInsert().Model(&row).
+		Column("uuid", "job_id", "agent", "prompt", "output", "closed", "verdict_bool",
+			"updated_by_machine_id", "created_at", "updated_at", "synced_at").
+		On("CONFLICT (uuid) DO UPDATE").Set("closed = excluded.closed").
+		Set("verdict_bool = COALESCE(rv.verdict_bool, excluded.verdict_bool)").
+		Set("updated_by_machine_id = excluded.updated_by_machine_id").
+		Set("updated_at = excluded.updated_at").Set("synced_at = ?", now).
+		Where(sqliteNormalizedTimestampExpr("rv.updated_at") + " < " + sqliteNormalizedTimestampExpr("excluded.updated_at")).
+		Exec(context.Background())
 	return err
 }
 
@@ -836,13 +903,14 @@ func (db *DB) UpsertPulledResponse(r PulledResponse) error {
 		return fmt.Errorf("find job for response: %w", err)
 	}
 
-	now := time.Now().UTC().Format(time.RFC3339)
-	_, err = db.Exec(`
-		INSERT INTO responses (
-			uuid, job_id, responder, response, source_machine_id, created_at, synced_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(uuid) DO NOTHING
-	`, r.UUID, jobID, r.Responder, r.Response, r.SourceMachineID, r.CreatedAt.Format(time.RFC3339), now)
+	row := responseRow{
+		UUID: &r.UUID, JobID: &jobID, Responder: r.Responder, Response: r.Response,
+		SourceMachineID: &r.SourceMachineID, CreatedAt: dbTimeFromValue(r.CreatedAt),
+		SyncedAt: dbTimeFromValue(time.Now()),
+	}
+	_, err = db.bun.NewInsert().Model(&row).
+		Column("uuid", "job_id", "responder", "response", "source_machine_id", "created_at", "synced_at").
+		On("CONFLICT (uuid) DO NOTHING").Exec(context.Background())
 	return err
 }
 
@@ -972,20 +1040,4 @@ func (db *DB) GetOrCreateCommitByRepoAndSHA(repoID int64, sha, author, subject s
 		return 0, fmt.Errorf("create commit: %w", err)
 	}
 	return commit.ID, nil
-}
-
-// nullStr returns nil if s is empty, otherwise returns s
-func nullStr(s string) any {
-	if s == "" {
-		return nil
-	}
-	return s
-}
-
-// nullTimeStr formats a time pointer or returns nil
-func nullTimeStr(t *time.Time) any {
-	if t == nil {
-		return nil
-	}
-	return t.Format(time.RFC3339)
 }
