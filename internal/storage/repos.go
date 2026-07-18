@@ -389,6 +389,23 @@ func (db *DB) ListRepos() ([]Repo, error) {
 	return repos, nil
 }
 
+func (db *DB) ListReposWithIdentity() ([]Repo, error) {
+	var rows []repoRow
+	if err := db.bun.NewSelect().
+		Model(&rows).
+		Column("id", "root_path", "name", "created_at", "identity").
+		Where("identity IS NOT NULL").
+		Where("identity != ''").
+		Scan(context.Background()); err != nil {
+		return nil, err
+	}
+	repos := make([]Repo, 0, len(rows))
+	for _, row := range rows {
+		repos = append(repos, row.toModel())
+	}
+	return repos, nil
+}
+
 // GetRepoByID returns a repo by its ID
 func (db *DB) GetRepoByID(id int64) (*Repo, error) {
 	return db.selectRepo(context.Background(), "id = ?", id)

@@ -2,7 +2,33 @@ package storage
 
 import "github.com/uptrace/bun"
 
-type ciPRReviewRow struct { //nolint:unused // Consumed by the staged Bun query conversion.
+var sqliteCIPanelColumns = []string{
+	"id",
+	"github_repo",
+	"pr_number",
+	"head_sha",
+	"panel_run_uuid",
+	"synthesis_job_id",
+	"created_at",
+	"posting_claimed_at",
+	"posted_at",
+	"retired_at",
+	"outcome",
+	"first_attempt_at",
+	"attempt_count",
+	"synthesis_agent",
+	"synthesis_model",
+	"allow_stale_post",
+}
+
+var sqliteReviewAttemptColumns = []string{
+	"id", "github_repo", "pr_number", "head_sha", "attempt",
+	"first_attempt_at", "next_attempt_at", "last_error_class",
+	"consecutive_genuine_attempts", "last_error_excerpt",
+	"last_panel_run_uuid", "state", "updated_at",
+}
+
+type ciPRReviewRow struct {
 	bun.BaseModel `bun:"table:ci_pr_reviews,alias:cpr"`
 	ID            int64  `bun:"id,pk,autoincrement"`
 	GithubRepo    string `bun:"github_repo"`
@@ -12,7 +38,7 @@ type ciPRReviewRow struct { //nolint:unused // Consumed by the staged Bun query 
 	CreatedAt     dbTime `bun:"created_at"`
 }
 
-type ciPanelRow struct { //nolint:unused // Consumed by the staged Bun query conversion.
+type ciPanelRow struct {
 	bun.BaseModel    `bun:"table:ci_pr_panels,alias:cp"`
 	ID               int64   `bun:"id,pk,autoincrement"`
 	GithubRepo       string  `bun:"github_repo"`
@@ -32,7 +58,29 @@ type ciPanelRow struct { //nolint:unused // Consumed by the staged Bun query con
 	AllowStalePost   bool    `bun:"allow_stale_post"`
 }
 
-type ciReviewAttemptRow struct { //nolint:unused // Consumed by the staged Bun query conversion.
+func (row ciPanelRow) toModel() CIPanel {
+	panel := CIPanel{
+		ID:               row.ID,
+		GithubRepo:       row.GithubRepo,
+		PRNumber:         row.PRNumber,
+		HeadSHA:          row.HeadSHA,
+		PanelRunUUID:     row.PanelRunUUID,
+		SynthesisJobID:   cloneInt64Pointer(row.SynthesisJobID),
+		CreatedAt:        row.CreatedAt.Time,
+		PostingClaimedAt: row.PostingClaimedAt.pointer(),
+		PostedAt:         row.PostedAt.pointer(),
+		RetiredAt:        row.RetiredAt.pointer(),
+		Outcome:          cloneStringPointer(row.Outcome),
+		FirstAttemptAt:   row.FirstAttemptAt.pointer(),
+		AttemptCount:     cloneInt64Pointer(row.AttemptCount),
+		SynthesisAgent:   cloneStringPointer(row.SynthesisAgent),
+		SynthesisModel:   cloneStringPointer(row.SynthesisModel),
+		AllowStalePost:   row.AllowStalePost,
+	}
+	return panel
+}
+
+type ciReviewAttemptRow struct {
 	bun.BaseModel              `bun:"table:ci_pr_review_attempts,alias:ca"`
 	ID                         int64  `bun:"id,pk,autoincrement"`
 	GithubRepo                 string `bun:"github_repo"`
@@ -47,6 +95,24 @@ type ciReviewAttemptRow struct { //nolint:unused // Consumed by the staged Bun q
 	LastPanelRunUUID           string `bun:"last_panel_run_uuid"`
 	State                      string `bun:"state"`
 	UpdatedAt                  dbTime `bun:"updated_at"`
+}
+
+func (row ciReviewAttemptRow) toModel() ReviewAttempt {
+	return ReviewAttempt{
+		ID:                         row.ID,
+		GithubRepo:                 row.GithubRepo,
+		PRNumber:                   row.PRNumber,
+		HeadSHA:                    row.HeadSHA,
+		Attempt:                    row.Attempt,
+		FirstAttemptAt:             row.FirstAttemptAt.Time,
+		NextAttemptAt:              row.NextAttemptAt.pointer(),
+		LastErrorClass:             row.LastErrorClass,
+		ConsecutiveGenuineAttempts: row.ConsecutiveGenuineAttempts,
+		LastErrorExcerpt:           row.LastErrorExcerpt,
+		LastPanelRunUUID:           row.LastPanelRunUUID,
+		State:                      row.State,
+		UpdatedAt:                  row.UpdatedAt.Time,
+	}
 }
 
 type daemonStateRow struct {

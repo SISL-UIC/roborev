@@ -137,6 +137,10 @@ func (db *DB) GetRecentReviewsForRepo(repoID int64, limit int) ([]Review, error)
 	return reviews, nil
 }
 
+func (db *DB) CountReviews() (int, error) {
+	return db.bun.NewSelect().Model((*reviewRow)(nil)).Count(context.Background())
+}
+
 // FindReusableSessionCandidates returns recent completed jobs with reusable
 // sessions for the same repo, branch, agent, and review type, newest first.
 func (db *DB) FindReusableSessionCandidates(
