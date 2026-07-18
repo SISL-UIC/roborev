@@ -51,7 +51,13 @@ func (t *dbTime) scanString(value string) error {
 			return nil
 		}
 	}
-	return fmt.Errorf("scan database time %q", value)
+	// Legacy SQLite readers tolerate non-empty, unrecognized timestamp text:
+	// parseSQLiteTime logs the value and returns zero time. Preserve that
+	// behavior during the staged Bun conversion so old databases remain
+	// readable while native PostgreSQL timestamps still use the time.Time path.
+	t.Time = parseSQLiteTime(value)
+	t.Valid = true
+	return nil
 }
 
 func (t dbTime) Value() (driver.Value, error) {

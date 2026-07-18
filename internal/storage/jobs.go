@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 	"unicode"
+
+	"github.com/uptrace/bun"
 )
 
 // retryNotBeforeLayout is a fixed-width timestamp layout used for the
@@ -860,7 +862,11 @@ func (db *DB) FailoverJob(jobID int64, workerID, backupAgent, backupModel string
 // GetJobRetryCount returns the retry count for a job
 func (db *DB) GetJobRetryCount(jobID int64) (int, error) {
 	var count int
-	err := db.QueryRow(`SELECT retry_count FROM review_jobs WHERE id = ?`, jobID).Scan(&count)
+	err := db.bun.NewSelect().
+		Table("review_jobs").
+		Column("retry_count").
+		Where("id = ?", jobID).
+		Scan(context.Background(), &count)
 	return count, err
 }
 
@@ -1075,78 +1081,65 @@ func buildJobFilterClause(statusFilter, repoFilter string, o listJobsOptions) (s
 	return " WHERE " + strings.Join(conditions, " AND "), args
 }
 
+func addJobSelectColumns(
+	query *bun.SelectQuery, columns []string,
+) *bun.SelectQuery {
+	for _, column := range columns {
+		query = query.ColumnExpr(column)
+	}
+	return query
+}
+
+func applyJobFilterClause(
+	query *bun.SelectQuery,
+	statusFilter string,
+	repoFilter string,
+	options listJobsOptions,
+) *bun.SelectQuery {
+	clause, args := buildJobFilterClause(statusFilter, repoFilter, options)
+	if clause == "" {
+		return query
+	}
+	return query.Where(strings.TrimPrefix(clause, " WHERE "), args...)
+}
+
 // ListJobs returns jobs with optional status, repo, branch, and closed filters.
 func (db *DB) ListJobs(statusFilter string, repoFilter string, limit, offset int, opts ...ListJobsOption) ([]ReviewJob, error) {
 	options := collectListJobsOptions(opts...)
-	// Metadata-only listings select a constant instead of the prompt column;
-	// the scan still binds the same positional field, it just never touches
-	// the large TEXT payload.
-	promptExpr := "j.prompt"
+	query := db.bun.NewSelect().
+		TableExpr("review_jobs AS j").
+		Join("JOIN repos AS r ON r.id = j.repo_id").
+		Join("LEFT JOIN commits AS c ON c.id = j.commit_id").
+		Join("LEFT JOIN reviews AS rv ON rv.job_id = j.id")
+	query = addJobSelectColumns(query, sqliteJobListColumns)
+	// Metadata-only listings select a constant instead of the prompt column,
+	// so SQLite never reads the large stored prompt payload.
 	if options.omitPrompt {
-		promptExpr = "''"
+		query = query.ColumnExpr("'' AS prompt")
+	} else {
+		query = query.ColumnExpr("j.prompt")
 	}
-	query := `
-		SELECT j.id, j.repo_id, j.commit_id, j.git_ref, j.branch, j.ci_base_branch, j.session_id, j.agent, j.reasoning, j.status, j.enqueued_at,
-		       j.started_at, j.finished_at, j.worker_id, j.error, ` + promptExpr + `, j.retry_count,
-		       COALESCE(j.agentic, 0), COALESCE(j.prompt_prebuilt, 0), r.root_path, r.name, c.subject, rv.closed, rv.output,
-		       rv.verdict_bool, j.source_machine_id, j.uuid, j.model, j.job_type, j.review_type, j.patch_id, COALESCE(j.output_prefix, ''),
-		       j.parent_job_id, j.provider, j.requested_model, j.requested_provider, j.token_usage, COALESCE(j.worktree_path, ''),
-		       j.command_line, j.dirty_files, COALESCE(j.min_severity, ''), COALESCE(j.backup_agent, ''), COALESCE(j.backup_model, ''),
-		       COALESCE(j.skip_reason, ''), COALESCE(j.source, ''),
-		       COALESCE(j.panel_run_uuid, ''), COALESCE(j.panel_role, ''), COALESCE(j.panel_name, ''), COALESCE(j.panel_member_name, ''), j.panel_member_index, COALESCE(j.panel_member_config_json, ''), COALESCE(j.claim_blocked, 0)
-		FROM review_jobs j
-		JOIN repos r ON r.id = j.repo_id
-		LEFT JOIN commits c ON c.id = j.commit_id
-		LEFT JOIN reviews rv ON rv.job_id = j.id
-	`
-	queryFilters, args := buildJobFilterClause(statusFilter, repoFilter, options)
-	query += queryFilters
-
-	query += " ORDER BY j.id DESC"
+	query = applyJobFilterClause(query, statusFilter, repoFilter, options).
+		OrderExpr("j.id DESC")
 
 	if limit > 0 {
-		query += " LIMIT ?"
-		args = append(args, limit)
+		query = query.Limit(limit)
 		// OFFSET requires LIMIT in SQLite
 		if offset > 0 {
-			query += " OFFSET ?"
-			args = append(args, offset)
+			query = query.Offset(offset)
 		}
 	}
 
-	rows, err := db.Query(query, args...)
-	if err != nil {
+	var rows []jobHydrationRow
+	if err := query.Scan(context.Background(), &rows); err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 
 	var jobs []ReviewJob
-	for rows.Next() {
-		var j ReviewJob
-		var output sql.NullString
-		var verdictBool sql.NullInt64
-		var fields reviewJobScanFields
-
-		err := rows.Scan(&j.ID, &j.RepoID, &fields.CommitID, &j.GitRef, &fields.Branch, &fields.CIBaseBranch, &fields.SessionID, &j.Agent, &j.Reasoning, &j.Status, &fields.EnqueuedAt,
-			&fields.StartedAt, &fields.FinishedAt, &fields.WorkerID, &fields.Error, &fields.Prompt, &j.RetryCount,
-			&fields.Agentic, &fields.PromptPrebuilt, &j.RepoPath, &j.RepoName, &fields.CommitSubject, &fields.Closed, &output,
-			&verdictBool, &fields.SourceMachineID, &fields.UUID, &fields.Model, &fields.JobType, &fields.ReviewType, &fields.PatchID, &fields.OutputPrefix,
-			&fields.ParentJobID, &fields.Provider, &fields.RequestedModel, &fields.RequestedProvider, &fields.TokenUsage, &fields.WorktreePath,
-			&fields.CommandLine, &fields.DirtyFiles, &fields.MinSeverity, &fields.BackupAgent, &fields.BackupModel,
-			&fields.SkipReason, &fields.Source,
-			&fields.PanelRunUUID, &fields.PanelRole, &fields.PanelName, &fields.PanelMemberName, &fields.PanelMemberIndex, &fields.PanelMemberConfig, &fields.ClaimBlocked)
-		if err != nil {
-			return nil, err
-		}
-		applyReviewJobScan(&j, fields)
-		if output.Valid {
-			applyJobVerdict(&j, verdictBool, output.String)
-		}
-
-		jobs = append(jobs, j)
+	for _, row := range rows {
+		jobs = append(jobs, row.toModel())
 	}
-
-	return jobs, rows.Err()
+	return jobs, nil
 }
 
 // GetJobByID returns a job by ID with joined fields
@@ -1160,49 +1153,35 @@ type JobStats struct {
 // CountJobStats returns aggregate done/closed/open counts
 // using the same filter logic as ListJobs (repo, branch, closed).
 func (db *DB) CountJobStats(repoFilter string, opts ...ListJobsOption) (JobStats, error) {
-	query := `
-		SELECT
-			COALESCE(SUM(CASE WHEN j.status = 'done' THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN j.status = 'done' AND rv.closed = 1 THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN j.status = 'done' AND (rv.closed IS NULL OR rv.closed = 0) THEN 1 ELSE 0 END), 0)
-		FROM review_jobs j
-		JOIN repos r ON r.id = j.repo_id
-		LEFT JOIN reviews rv ON rv.job_id = j.id
-	`
-	queryFilters, args := buildJobFilterClause("", repoFilter, collectListJobsOptions(opts...))
-	query += queryFilters
-
 	var stats JobStats
-	err := db.QueryRow(query, args...).Scan(&stats.Done, &stats.Closed, &stats.Open)
+	query := db.bun.NewSelect().
+		TableExpr("review_jobs AS j").
+		ColumnExpr("COALESCE(SUM(CASE WHEN j.status = 'done' THEN 1 ELSE 0 END), 0) AS done").
+		ColumnExpr("COALESCE(SUM(CASE WHEN j.status = 'done' AND rv.closed = 1 THEN 1 ELSE 0 END), 0) AS closed").
+		ColumnExpr("COALESCE(SUM(CASE WHEN j.status = 'done' AND (rv.closed IS NULL OR rv.closed = 0) THEN 1 ELSE 0 END), 0) AS open").
+		Join("JOIN repos AS r ON r.id = j.repo_id").
+		Join("LEFT JOIN reviews AS rv ON rv.job_id = j.id")
+	query = applyJobFilterClause(
+		query, "", repoFilter, collectListJobsOptions(opts...),
+	)
+	err := query.Scan(context.Background(), &stats)
 	return stats, err
 }
 
 func (db *DB) GetJobByID(id int64) (*ReviewJob, error) {
-	var j ReviewJob
-	var fields reviewJobScanFields
-	err := db.QueryRow(`
-		SELECT j.id, j.repo_id, j.commit_id, j.git_ref, j.branch, j.ci_base_branch, j.session_id, j.agent, j.reasoning, j.status, j.enqueued_at,
-		       j.started_at, j.finished_at, j.worker_id, j.error, j.prompt, j.retry_count, COALESCE(j.agentic, 0),
-		       r.root_path, r.name, c.subject, j.model, j.provider, j.requested_model, j.requested_provider, j.job_type, j.review_type, j.patch_id, COALESCE(j.output_prefix, ''),
-		       j.parent_job_id, j.patch, j.token_usage, j.dirty_files, COALESCE(j.worktree_path, ''), j.command_line, COALESCE(j.min_severity, ''), COALESCE(j.backup_agent, ''), COALESCE(j.backup_model, ''),
-		       COALESCE(j.skip_reason, ''), COALESCE(j.source, ''),
-		       COALESCE(j.panel_run_uuid, ''), COALESCE(j.panel_role, ''), COALESCE(j.panel_name, ''), COALESCE(j.panel_member_name, ''), j.panel_member_index, COALESCE(j.panel_member_config_json, ''), COALESCE(j.claim_blocked, 0)
-		FROM review_jobs j
-		JOIN repos r ON r.id = j.repo_id
-		LEFT JOIN commits c ON c.id = j.commit_id
-		WHERE j.id = ?
-	`, id).Scan(&j.ID, &j.RepoID, &fields.CommitID, &j.GitRef, &fields.Branch, &fields.CIBaseBranch, &fields.SessionID, &j.Agent, &j.Reasoning, &j.Status, &fields.EnqueuedAt,
-		&fields.StartedAt, &fields.FinishedAt, &fields.WorkerID, &fields.Error, &fields.Prompt, &j.RetryCount, &fields.Agentic,
-		&j.RepoPath, &j.RepoName, &fields.CommitSubject, &fields.Model, &fields.Provider, &fields.RequestedModel, &fields.RequestedProvider, &fields.JobType, &fields.ReviewType, &fields.PatchID, &fields.OutputPrefix,
-		&fields.ParentJobID, &fields.Patch, &fields.TokenUsage, &fields.DirtyFiles, &fields.WorktreePath, &fields.CommandLine, &fields.MinSeverity, &fields.BackupAgent, &fields.BackupModel,
-		&fields.SkipReason, &fields.Source,
-		&fields.PanelRunUUID, &fields.PanelRole, &fields.PanelName, &fields.PanelMemberName, &fields.PanelMemberIndex, &fields.PanelMemberConfig, &fields.ClaimBlocked)
-	if err != nil {
+	var row jobHydrationRow
+	query := db.bun.NewSelect().
+		TableExpr("review_jobs AS j").
+		Join("JOIN repos AS r ON r.id = j.repo_id").
+		Join("LEFT JOIN commits AS c ON c.id = j.commit_id").
+		Where("j.id = ?", id)
+	query = addJobSelectColumns(query, sqliteJobDetailColumns).
+		ColumnExpr("j.prompt")
+	if err := query.Scan(context.Background(), &row); err != nil {
 		return nil, err
 	}
-	applyReviewJobScan(&j, fields)
-
-	return &j, nil
+	job := row.toModel()
+	return &job, nil
 }
 
 // GetJobDiffContent returns the stored dirty-diff blob for a job (empty string
@@ -1211,10 +1190,11 @@ func (db *DB) GetJobByID(id int64) (*ReviewJob, error) {
 // (GetPanelMembers, GetJobByID) recover the frozen diff without claiming.
 func (db *DB) GetJobDiffContent(jobID int64) (string, error) {
 	var diff string
-	err := db.QueryRow(
-		"SELECT COALESCE(diff_content, '') FROM review_jobs WHERE id = ?",
-		jobID,
-	).Scan(&diff)
+	err := db.bun.NewSelect().
+		Table("review_jobs").
+		ColumnExpr("COALESCE(diff_content, '')").
+		Where("id = ?", jobID).
+		Scan(context.Background(), &diff)
 	if err != nil {
 		return "", fmt.Errorf("get job diff content: %w", err)
 	}
@@ -1223,55 +1203,59 @@ func (db *DB) GetJobDiffContent(jobID int64) (string, error) {
 
 // GetJobDirtyFiles returns the stored unfiltered dirty file names for a job.
 func (db *DB) GetJobDirtyFiles(jobID int64) ([]string, error) {
-	var files sql.NullString
-	err := db.QueryRow(
-		"SELECT dirty_files FROM review_jobs WHERE id = ?",
-		jobID,
-	).Scan(&files)
+	var row struct {
+		DirtyFiles *string `bun:"dirty_files"`
+	}
+	err := db.bun.NewSelect().
+		Table("review_jobs").
+		Column("dirty_files").
+		Where("id = ?", jobID).
+		Scan(context.Background(), &row)
 	if err != nil {
 		return nil, fmt.Errorf("get job dirty files: %w", err)
 	}
-	if !files.Valid {
+	if row.DirtyFiles == nil {
 		return nil, nil
 	}
-	return decodeDirtyFiles(files.String), nil
+	return decodeDirtyFiles(*row.DirtyFiles), nil
 }
 
 // GetJobCounts returns counts of jobs by status
 func (db *DB) GetJobCounts() (queued, running, done, failed, canceled, applied, rebased, skipped int, err error) {
-	rows, err := db.Query(`SELECT status, COUNT(*) FROM review_jobs GROUP BY status`)
-	if err != nil {
+	var rows []struct {
+		Status JobStatus `bun:"status"`
+		Count  int       `bun:"count"`
+	}
+	if err := db.bun.NewSelect().
+		Table("review_jobs").
+		Column("status").
+		ColumnExpr("COUNT(*) AS count").
+		GroupExpr("status").
+		Scan(context.Background(), &rows); err != nil {
 		return queued, running, done, failed, canceled, applied, rebased, skipped, err
 	}
-	defer rows.Close()
 
-	for rows.Next() {
-		var status string
-		var count int
-		if err = rows.Scan(&status, &count); err != nil {
-			return queued, running, done, failed, canceled, applied, rebased, skipped, err
-		}
-		switch JobStatus(status) {
+	for _, row := range rows {
+		switch row.Status {
 		case JobStatusQueued:
-			queued = count
+			queued = row.Count
 		case JobStatusRunning:
-			running = count
+			running = row.Count
 		case JobStatusDone:
-			done = count
+			done = row.Count
 		case JobStatusFailed:
-			failed = count
+			failed = row.Count
 		case JobStatusCanceled:
-			canceled = count
+			canceled = row.Count
 		case JobStatusApplied:
-			applied = count
+			applied = row.Count
 		case JobStatusRebased:
-			rebased = count
+			rebased = row.Count
 		case JobStatusSkipped:
-			skipped = count
+			skipped = row.Count
 		}
 	}
-	err = rows.Err()
-	return queued, running, done, failed, canceled, applied, rebased, skipped, err
+	return queued, running, done, failed, canceled, applied, rebased, skipped, nil
 }
 
 // UpdateJobBranch sets the branch field for a job that doesn't have one.

@@ -1,6 +1,10 @@
 package storage
 
-import "github.com/uptrace/bun"
+import (
+	"database/sql"
+
+	"github.com/uptrace/bun"
+)
 
 var sqliteJobColumns = []string{
 	"id",
@@ -142,6 +146,109 @@ var sqliteJobInsertColumns = []string{
 	"source",
 }
 
+var sqliteJobListColumns = []string{
+	"j.id",
+	"j.repo_id",
+	"j.commit_id",
+	"j.git_ref",
+	"j.branch",
+	"j.ci_base_branch",
+	"j.session_id",
+	"j.agent",
+	"j.reasoning",
+	"j.status",
+	"j.enqueued_at",
+	"j.started_at",
+	"j.finished_at",
+	"j.worker_id",
+	"j.error",
+	"j.retry_count",
+	"COALESCE(j.agentic, 0) AS agentic",
+	"COALESCE(j.prompt_prebuilt, 0) AS prompt_prebuilt",
+	"j.source_machine_id",
+	"j.uuid",
+	"j.model",
+	"COALESCE(j.job_type, '') AS job_type",
+	"COALESCE(j.review_type, '') AS review_type",
+	"j.patch_id",
+	"j.output_prefix",
+	"j.parent_job_id",
+	"j.provider",
+	"j.requested_model",
+	"j.requested_provider",
+	"j.token_usage",
+	"j.worktree_path",
+	"j.command_line",
+	"j.dirty_files",
+	"COALESCE(j.min_severity, '') AS min_severity",
+	"COALESCE(j.backup_agent, '') AS backup_agent",
+	"COALESCE(j.backup_model, '') AS backup_model",
+	"j.skip_reason",
+	"j.source",
+	"j.panel_run_uuid",
+	"j.panel_role",
+	"j.panel_name",
+	"j.panel_member_name",
+	"j.panel_member_index",
+	"j.panel_member_config_json",
+	"COALESCE(j.claim_blocked, 0) AS claim_blocked",
+	"r.root_path AS repo_path",
+	"r.name AS repo_name",
+	"c.subject AS commit_subject",
+	"rv.closed AS review_closed",
+	"rv.output AS review_output",
+	"rv.verdict_bool AS review_verdict_bool",
+}
+
+var sqliteJobDetailColumns = []string{
+	"j.id",
+	"j.repo_id",
+	"j.commit_id",
+	"j.git_ref",
+	"j.branch",
+	"j.ci_base_branch",
+	"j.session_id",
+	"j.agent",
+	"j.reasoning",
+	"j.status",
+	"j.enqueued_at",
+	"j.started_at",
+	"j.finished_at",
+	"j.worker_id",
+	"j.error",
+	"j.retry_count",
+	"COALESCE(j.agentic, 0) AS agentic",
+	"j.model",
+	"j.provider",
+	"j.requested_model",
+	"j.requested_provider",
+	"COALESCE(j.job_type, '') AS job_type",
+	"COALESCE(j.review_type, '') AS review_type",
+	"j.patch_id",
+	"j.output_prefix",
+	"j.parent_job_id",
+	"j.patch",
+	"j.token_usage",
+	"j.dirty_files",
+	"j.worktree_path",
+	"j.command_line",
+	"COALESCE(j.min_severity, '') AS min_severity",
+	"COALESCE(j.backup_agent, '') AS backup_agent",
+	"COALESCE(j.backup_model, '') AS backup_model",
+	"j.skip_reason",
+	"j.source",
+	"j.panel_run_uuid",
+	"j.panel_role",
+	"j.panel_name",
+	"j.panel_member_name",
+	"j.panel_member_index",
+	"j.panel_member_config_json",
+	"COALESCE(j.claim_blocked, 0) AS claim_blocked",
+	"r.root_path AS repo_path",
+	"r.name AS repo_name",
+	"c.subject AS commit_subject",
+}
+
 type jobRow struct {
 	bun.BaseModel `bun:"table:review_jobs,alias:j"`
 
@@ -198,6 +305,36 @@ type jobRow struct {
 	CreatedAt             dbTime      `bun:"created_at"`
 	UpdatedAt             dbTime      `bun:"updated_at"`
 	SyncedAt              dbTime      `bun:"synced_at"`
+}
+
+type jobHydrationRow struct {
+	jobRow
+	RepoPath          string  `bun:"repo_path"`
+	RepoName          string  `bun:"repo_name"`
+	CommitSubject     *string `bun:"commit_subject"`
+	ReviewClosed      *bool   `bun:"review_closed"`
+	ReviewOutput      *string `bun:"review_output"`
+	ReviewVerdictBool *int64  `bun:"review_verdict_bool"`
+}
+
+func (row jobHydrationRow) toModel() ReviewJob {
+	var job ReviewJob
+	row.applyToModel(&job)
+	job.RepoPath = row.RepoPath
+	job.RepoName = row.RepoName
+	job.CommitSubject = stringValue(row.CommitSubject)
+	job.Closed = row.ReviewClosed
+	if row.ReviewOutput != nil {
+		var verdict sql.NullInt64
+		if row.ReviewVerdictBool != nil {
+			verdict = sql.NullInt64{
+				Int64: *row.ReviewVerdictBool,
+				Valid: true,
+			}
+		}
+		applyJobVerdict(&job, verdict, *row.ReviewOutput)
+	}
+	return job
 }
 
 // jobRowFromModel maps fields owned by the public ReviewJob model. Callers
