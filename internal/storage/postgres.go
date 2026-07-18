@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"database/sql"
 	_ "embed"
 	"errors"
 	"fmt"
@@ -12,6 +13,9 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jackc/pgx/v5/stdlib"
+	"github.com/uptrace/bun"
+	"github.com/uptrace/bun/dialect/pgdialect"
 )
 
 // PostgreSQL schema version - increment when schema changes
@@ -52,8 +56,13 @@ func pgSchemaStatements() []string {
 // PgPool wraps a pgx connection pool with reconnection logic
 type PgPool struct {
 	pool       *pgxpool.Pool
+	bun        *bun.DB
 	connString string
 	config     PgPoolConfig
+}
+
+func newPostgresBunDB(db *sql.DB) *bun.DB {
+	return bun.NewDB(db, pgdialect.New())
 }
 
 // PgPoolConfig configures the PostgreSQL connection pool
@@ -125,9 +134,11 @@ func NewPgPool(ctx context.Context, connString string, cfg PgPoolConfig) (*PgPoo
 		pool.Close()
 		return nil, fmt.Errorf("ping postgres: %w", err)
 	}
+	sqldb := stdlib.OpenDBFromPool(pool)
 
 	return &PgPool{
 		pool:       pool,
+		bun:        newPostgresBunDB(sqldb),
 		connString: connString,
 		config:     cfg,
 	}, nil
@@ -135,6 +146,11 @@ func NewPgPool(ctx context.Context, connString string, cfg PgPoolConfig) (*PgPoo
 
 // Close closes the connection pool
 func (p *PgPool) Close() {
+	if p.bun != nil {
+		if err := p.bun.Close(); err != nil {
+			log.Printf("close postgres Bun wrapper: %v", err)
+		}
+	}
 	if p.pool != nil {
 		p.pool.Close()
 	}
