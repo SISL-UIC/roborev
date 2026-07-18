@@ -640,6 +640,8 @@ func decodeExportCursor(cursor string) (*exportCursor, error) {
 func (db *DB) exportCursorReviewExists(cursor *exportCursor) (bool, error) {
 	completedExpr := sqliteNormalizedTimestampExpr("rv.created_at")
 	var count int
+	// Raw SQL allowlist: cursor validation must use the same SQLite-normalized
+	// completion expression and eligibility predicates as export pagination.
 	err := db.bun.QueryRowContext(context.Background(), `
 		SELECT COUNT(1)
 		FROM reviews rv
