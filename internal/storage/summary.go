@@ -202,6 +202,9 @@ func (db *DB) GetSummary(opts SummaryOptions) (*Summary, error) {
 }
 
 func summaryOverview(q bun.IDB, where string, args []any) (OverviewStats, error) {
+	// Raw SQL allowlist: summary helpers share expression-heavy aggregate
+	// projections and dynamically composed filters that Bun does not simplify.
+	// They still execute through the caller's Bun DB or snapshot transaction.
 	query := `
 		SELECT
 			COALESCE(SUM(CASE WHEN j.status = 'queued' THEN 1 ELSE 0 END), 0),

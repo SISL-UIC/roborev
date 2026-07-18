@@ -140,6 +140,8 @@ func (db *DB) exportCIMetricsPanels(opts ExportCIMetricsOptions, cursor *ciMetri
 	}
 	args = append(args, opts.Limit+1)
 
+	// Raw SQL allowlist: CI export pagination combines a dynamic predicate set,
+	// SQLite-normalized timestamp cursor, fallback projections, and ordered joins.
 	query := `
 		SELECT cp.id, cp.github_repo, cp.pr_number, cp.head_sha,
 		       cp.created_at, cp.posted_at, cp.first_attempt_at,
@@ -280,6 +282,8 @@ func (db *DB) exportCIMetricsLegacy(opts ExportCIMetricsOptions, cursor *ciMetri
 		"SUM(CASE WHEN j.status = 'done' THEN 1 ELSE 0 END) >= 1")
 	args = append(args, opts.Limit+1)
 
+	// Raw SQL allowlist: legacy CI reconstruction uses a shared CTE, grouped
+	// HAVING policy, and database-native time-window expressions as one query.
 	query := `
 		WITH ` + legacyUnitWindowCTE + `
 		SELECT MIN(j.id), j.repo_id,
@@ -369,6 +373,8 @@ func (db *DB) exportCIMetricsLegacy(opts ExportCIMetricsOptions, cursor *ciMetri
 // this runs against complete data and is never a live, drifting feed.
 func (db *DB) legacyPanelEraEnd() (string, error) {
 	var end sql.NullString
+	// Raw SQL allowlist: the legacy boundary is the minimum across two sources
+	// and relies on SQLite strftime normalization inside a UNION aggregate.
 	err := db.bun.QueryRowContext(context.Background(), `
 		SELECT MIN(t) FROM (
 			SELECT MIN(strftime('%Y-%m-%dT%H:%M:%SZ', j.enqueued_at)) AS t
@@ -445,6 +451,8 @@ var legacyUnitWindowEndSubquery = `(
 // unit in id order — bounded to the adjacency window and pre-panel era like
 // the unit query — shaped as ExportCIPanelJob rows tagged role "review".
 func (db *DB) legacyUnitJobs(repoID int64, gitRef, eraEnd string) ([]ExportCIPanelJob, error) {
+	// Raw SQL allowlist: legacy membership reuses the database-native adjacency
+	// window expression and explicit ordered projection used by the page query.
 	rows, err := db.bun.QueryContext(context.Background(), `
 		SELECT j.uuid, j.agent, j.model, j.provider, j.status,
 		       `+legacyUnitTimeExpr("j.started_at")+`,
@@ -538,6 +546,8 @@ func scanCIMetricsRow(rows *sql.Rows) (int64, ExportCIPanel, string, error) {
 }
 
 func (db *DB) exportCIPanelJobs(panelRunUUID string) ([]ExportCIPanelJob, error) {
+	// Raw SQL allowlist: this joined export projection preserves role ordering
+	// and nullable timestamp scanning without introducing relation hydration.
 	rows, err := db.bun.QueryContext(context.Background(), `
 		SELECT j.uuid, COALESCE(j.panel_role, ''), j.agent, j.model,
 		       j.provider, j.status, j.started_at, j.finished_at
@@ -643,6 +653,9 @@ func (db *DB) resolveCIMetricsCursor(cursor string, legacy bool) (*ciMetricsCurs
 			ErrExportCursorDatabaseMismatch, decoded.DatabaseID, databaseID,
 		)
 	}
+	// Raw SQL allowlist: cursor validation must re-derive either the persisted
+	// panel timestamp or the legacy grouped unit using the same SQLite time
+	// expressions as pagination.
 	existsQuery := `
 		SELECT COUNT(1) FROM ci_pr_panels cp
 		WHERE cp.id = ? AND cp.posted_at IS NOT NULL

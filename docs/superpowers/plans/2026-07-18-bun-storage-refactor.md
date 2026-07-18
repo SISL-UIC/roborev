@@ -766,7 +766,7 @@ git commit -m "Document and enforce Bun storage boundaries"
 
 **Interfaces:** None; this task proves the completed behavior.
 
-- [ ] **Step 1: Run all untagged tests**
+- [x] **Step 1: Run all untagged tests**
 
 ```bash
 go test ./... -count=1
@@ -774,7 +774,7 @@ go test ./... -count=1
 
 Expected: PASS.
 
-- [ ] **Step 2: Run PostgreSQL integration tests**
+- [x] **Step 2: Run PostgreSQL integration tests**
 
 ```bash
 go test -tags=postgres -v ./internal/storage/... -run Integration -count=1
@@ -782,7 +782,7 @@ go test -tags=postgres -v ./internal/storage/... -run Integration -count=1
 
 Expected: PASS with a configured PostgreSQL test database.
 
-- [ ] **Step 3: Run build and non-mutating quality gates**
+- [x] **Step 3: Run build and non-mutating quality gates**
 
 ```bash
 go build ./...
@@ -793,7 +793,7 @@ prek run --all-files
 
 Expected: PASS.
 
-- [ ] **Step 4: Inspect the final diff and history**
+- [x] **Step 4: Inspect the final diff and history**
 
 ```bash
 git status --short
@@ -809,7 +809,7 @@ the repository forbids those operations without explicit user authorization.
 When authorization is provided, perform the requested synchronization and
 verify the branch is up to date with its remote.
 
-- [ ] **Step 5: Create a final regression-fix commit only if needed**
+- [x] **Step 5: Create a final regression-fix commit only if needed**
 
 If verification required source changes, stage only those fixes and commit:
 

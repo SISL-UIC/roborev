@@ -188,6 +188,9 @@ func (db *DB) ExportReviews(opts ExportReviewsOptions) (ExportReviewsPage, error
 }
 
 func (db *DB) queryExportReviewRows(opts ExportReviewsOptions, cursor *exportCursor) (*sql.Rows, error) {
+	// Raw SQL allowlist: the export owns a dynamic content projection, optional
+	// joins/filters, and a SQLite-normalized keyset cursor. Keep that statement
+	// intact while executing it through Bun's connection.
 	outputExpr := "NULL"
 	if opts.Profile == ExportProfileContent {
 		outputExpr = "rv.output"
@@ -330,6 +333,8 @@ func (row exportReviewRow) exportCommitSHA() string {
 }
 
 func (db *DB) exportSubagents(panelRunUUID string, profile ExportProfile) ([]ExportSubagent, error) {
+	// Raw SQL allowlist: the content profile changes the selected output column
+	// while the joined, ordered panel-member projection must stay explicit.
 	outputExpr := "NULL"
 	if profile == ExportProfileContent {
 		outputExpr = "rv.output"
