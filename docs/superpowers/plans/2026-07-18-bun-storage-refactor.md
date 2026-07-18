@@ -254,17 +254,31 @@ type commitRow struct {
 
 Define `dbTime` with `Scan(any) error` and `Value() (driver.Value, error)`.
 `Scan` must accept native `time.Time`, RFC3339 `string`/`[]byte`, bare SQLite
-`2006-01-02 15:04:05`, and `nil`. Use its validity bit for nullable timestamps.
-This keeps one row model without losing SQLite legacy parsing or converting
-native PostgreSQL timestamps through string projections.
+`2006-01-02 15:04:05`, SQLite's offset-bearing `time.Time` encoding, and
+`nil`. For valid values, `Value` returns UTC RFC3339Nano text; for invalid
+values it returns SQL `NULL`. PostgreSQL coerces writes to its native timestamp
+type and returns native `time.Time` values on reads.
+
+Define a separate `dbRetryTime` for the SQLite-only `retry_not_before`
+column. Its `Value` method must call `retryNotBeforeAt` so values are UTC with
+exactly nine fractional digits for the existing lexicographic claim predicate.
+Add a test that writes this type through Bun and verifies the real `ClaimJob`
+predicate does not claim the deferred row.
 
 - [ ] **Step 4: Implement job/review/response rows and mappings**
 
-Define one superset `jobRow` with every logical field and explicit column
-lists for each store. Add `reviewRow` and `responseRow` with both local integer
+Define one superset `jobRow` with every logical field and explicit
+operation-role column lists. `sqliteJobColumns` covers local persisted state;
+`postgresJobColumns` is the synchronization projection rather than the full
+physical schema. It includes `agent_invoked` and excludes local checkout or
+scheduling fields including `branch`, `retry_not_before`, `skip_reason`, and
+`created_at`. Add `reviewRow` and `responseRow` with both local integer
 relations and sync UUID relations. Mapping functions must call existing helpers
 such as `encodeDirtyFiles`, `decodeDirtyFiles`, and `parseSQLiteTime` rather than
-duplicating behavior.
+duplicating behavior. Never issue a model-wide update from
+`jobRowFromModel(ReviewJob)`; each insert, projection, transition, and sync
+operation owns an explicit column subset because `ReviewJob` does not contain
+all persistence-only state.
 
 - [ ] **Step 5: Implement CI rows**
 

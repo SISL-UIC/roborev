@@ -151,60 +151,7 @@ func (db *DB) insertJobTx(ctx context.Context, exec execer, opts EnqueueOpts, ui
 		}
 	}
 
-	agenticInt := 0
-	if opts.Agentic {
-		agenticInt = 1
-	}
-
-	nowStr := now.Format(time.RFC3339)
-
-	// Use NULL for commit_id when not a single-commit review
-	var commitIDParam any
-	if opts.CommitID > 0 {
-		commitIDParam = opts.CommitID
-	}
-
-	// Use NULL for parent_job_id when not a fix job
-	var parentJobIDParam any
-	if opts.ParentJobID > 0 {
-		parentJobIDParam = opts.ParentJobID
-	}
-
-	promptPrebuiltInt := 0
-	if opts.PromptPrebuilt {
-		promptPrebuiltInt = 1
-	}
-	dirtyFilesJSON, err := encodeDirtyFiles(opts.DirtyFiles)
-	if err != nil {
-		return nil, err
-	}
-
-	claimBlockedInt := 0
-	if opts.ClaimBlocked {
-		claimBlockedInt = 1
-	}
-
-	result, err := exec.ExecContext(ctx, `
-		INSERT INTO review_jobs (repo_id, commit_id, git_ref, branch, ci_base_branch, session_id, agent, model, provider, requested_model, requested_provider, reasoning,
-			status, job_type, review_type, patch_id, diff_content, dirty_files, prompt, agentic, prompt_prebuilt, output_prefix,
-			parent_job_id, uuid, source_machine_id, updated_at, worktree_path, min_severity, backup_agent, backup_model,
-			panel_run_uuid, panel_role, panel_name, panel_member_name, panel_member_index, panel_member_config_json, claim_blocked, source)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		opts.RepoID, commitIDParam, gitRef, nullString(opts.Branch), nullString(opts.CIBaseBranch), nullString(opts.SessionID),
-		opts.Agent, nullString(opts.Model), nullString(opts.Provider), nullString(opts.RequestedModel), nullString(opts.RequestedProvider), reasoning,
-		jobType, opts.ReviewType, nullString(opts.PatchID),
-		nullString(opts.DiffContent), nullString(dirtyFilesJSON), nullString(opts.Prompt), agenticInt, promptPrebuiltInt,
-		nullString(opts.OutputPrefix), parentJobIDParam,
-		uid, machineID, nowStr, opts.WorktreePath, normalizeMinSeverityForWrite(opts.MinSeverity), opts.BackupAgent, opts.BackupModel,
-		nullString(opts.PanelRunUUID), nullString(opts.PanelRole), nullString(opts.PanelName),
-		nullString(opts.PanelMemberName), opts.PanelMemberIndex, nullString(opts.PanelMemberConfigJSON), claimBlockedInt, nullString(opts.Source))
-	if err != nil {
-		return nil, err
-	}
-
-	id, _ := result.LastInsertId()
 	job := &ReviewJob{
-		ID:                    id,
 		RepoID:                opts.RepoID,
 		GitRef:                gitRef,
 		Branch:                opts.Branch,
@@ -251,6 +198,16 @@ func (db *DB) insertJobTx(ctx context.Context, exec execer, opts EnqueueOpts, ui
 	if opts.DiffContent != "" {
 		job.DiffContent = &opts.DiffContent
 	}
+
+	row := jobRowFromModel(*job)
+	insert := db.bun.NewInsert().
+		Model(&row).
+		Column(sqliteJobInsertColumns...)
+	result, err := exec.ExecContext(ctx, insert.String())
+	if err != nil {
+		return nil, err
+	}
+	job.ID, _ = result.LastInsertId()
 	return job, nil
 }
 

@@ -58,7 +58,7 @@ func (t dbTime) Value() (driver.Value, error) {
 	if !t.Valid {
 		return nil, nil
 	}
-	return t.Time.Format(time.RFC3339Nano), nil
+	return t.Time.UTC().Format(time.RFC3339Nano), nil
 }
 
 func dbTimeFromValue(value time.Time) dbTime {
@@ -78,6 +78,35 @@ func (t dbTime) pointer() *time.Time {
 	}
 	value := t.Time
 	return &value
+}
+
+// dbRetryTime is the local-only retry gate timestamp. Unlike general
+// timestamps, SQLite compares retry_not_before lexicographically, so writes
+// must remain fixed-width and UTC.
+type dbRetryTime struct {
+	Time  time.Time
+	Valid bool
+}
+
+func dbRetryTimeFromValue(value time.Time) dbRetryTime {
+	return dbRetryTime{Time: value, Valid: true}
+}
+
+func (t *dbRetryTime) Scan(value any) error {
+	var scanned dbTime
+	if err := scanned.Scan(value); err != nil {
+		return err
+	}
+	t.Time = scanned.Time
+	t.Valid = scanned.Valid
+	return nil
+}
+
+func (t dbRetryTime) Value() (driver.Value, error) {
+	if !t.Valid {
+		return nil, nil
+	}
+	return retryNotBeforeAt(t.Time), nil
 }
 
 func optionalString(value string) *string {

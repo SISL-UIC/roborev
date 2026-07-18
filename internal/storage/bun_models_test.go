@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -45,8 +46,9 @@ func TestDBTimeScan(t *testing.T) {
 
 func TestDBTimeValue(t *testing.T) {
 	want := time.Date(2026, time.July, 18, 15, 4, 5, 123456789, time.UTC)
+	input := want.In(time.FixedZone("EDT", -4*60*60))
 
-	value, err := (dbTime{Time: want, Valid: true}).Value()
+	value, err := (dbTime{Time: input, Valid: true}).Value()
 	require.NoError(t, err)
 	assert.Equal(t, want.Format(time.RFC3339Nano), value)
 
@@ -55,6 +57,51 @@ func TestDBTimeValue(t *testing.T) {
 	assert.Nil(t, value)
 
 	assert.True(t, dbTimeFromValue(time.Time{}).Valid)
+}
+
+func TestDBRetryTimeValueUsesFixedWidthUTC(t *testing.T) {
+	input := time.Date(
+		2026, time.July, 18, 11, 4, 5, 500000000,
+		time.FixedZone("EDT", -4*60*60),
+	)
+
+	value, err := dbRetryTimeFromValue(input).Value()
+	require.NoError(t, err)
+	assert.Equal(t, "2026-07-18T15:04:05.500000000Z", value)
+}
+
+func TestBunRetryTimePreservesClaimOrdering(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "reviews.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+
+	repo, err := db.GetOrCreateRepo("/tmp/bun-retry-order")
+	require.NoError(t, err)
+	job, err := db.EnqueueJob(EnqueueOpts{
+		RepoID:  repo.ID,
+		GitRef:  "abc123",
+		Agent:   "test",
+		JobType: JobTypeRange,
+	})
+	require.NoError(t, err)
+
+	future := time.Now().Add(time.Hour)
+	_, err = db.bun.NewUpdate().
+		Model((*jobRow)(nil)).
+		Set("retry_not_before = ?", dbRetryTimeFromValue(future)).
+		Where("id = ?", job.ID).
+		Exec(t.Context())
+	require.NoError(t, err)
+
+	var stored string
+	require.NoError(t, db.QueryRow(
+		"SELECT CAST(retry_not_before AS TEXT) FROM review_jobs WHERE id = ?", job.ID,
+	).Scan(&stored))
+	assert.Equal(t, retryNotBeforeAt(future), stored)
+
+	claimed, err := db.ClaimJob("worker-1")
+	require.NoError(t, err)
+	assert.Nil(t, claimed)
 }
 
 func TestReviewJobRowRoundTripPreservesPersistedFields(t *testing.T) {
@@ -127,6 +174,14 @@ func TestJobColumnSetsDocumentStoreRoles(t *testing.T) {
 	assert.Contains(t, sqliteJobColumns, "worker_id")
 	assert.NotContains(t, postgresJobColumns, "worker_id")
 	assert.Contains(t, postgresJobColumns, "source_machine_id")
+	assert.Contains(t, postgresJobColumns, "agent_invoked")
+	assert.NotContains(t, postgresJobColumns, "branch")
+	assert.NotContains(t, postgresJobColumns, "retry_not_before")
+	assert.NotContains(t, postgresJobColumns, "skip_reason")
+	assert.NotContains(t, postgresJobColumns, "created_at")
 	assert.Contains(t, sqliteJobColumns, "synced_at")
 	assert.NotContains(t, postgresJobColumns, "synced_at")
+	assert.NotContains(t, sqliteJobInsertColumns, "agent_invoked")
+	assert.NotContains(t, sqliteJobInsertColumns, "retry_not_before")
+	assert.NotContains(t, sqliteJobInsertColumns, "created_at")
 }

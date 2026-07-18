@@ -57,13 +57,14 @@ var sqliteJobColumns = []string{
 	"synced_at",
 }
 
+// postgresJobColumns is the synchronized PostgreSQL projection, not every
+// physical schema column. Local checkout and scheduling state stays in SQLite.
 var postgresJobColumns = []string{
 	"id",
 	"uuid",
 	"repo_id",
 	"commit_id",
 	"git_ref",
-	"branch",
 	"session_id",
 	"agent",
 	"model",
@@ -80,7 +81,6 @@ var postgresJobColumns = []string{
 	"enqueued_at",
 	"started_at",
 	"finished_at",
-	"retry_not_before",
 	"prompt",
 	"diff_content",
 	"dirty_files",
@@ -90,7 +90,6 @@ var postgresJobColumns = []string{
 	"min_severity",
 	"backup_agent",
 	"backup_model",
-	"skip_reason",
 	"source",
 	"panel_run_uuid",
 	"panel_role",
@@ -99,68 +98,112 @@ var postgresJobColumns = []string{
 	"panel_member_index",
 	"panel_member_config_json",
 	"source_machine_id",
-	"created_at",
 	"updated_at",
+}
+
+var sqliteJobInsertColumns = []string{
+	"repo_id",
+	"commit_id",
+	"git_ref",
+	"branch",
+	"ci_base_branch",
+	"session_id",
+	"agent",
+	"model",
+	"provider",
+	"requested_model",
+	"requested_provider",
+	"reasoning",
+	"status",
+	"job_type",
+	"review_type",
+	"patch_id",
+	"diff_content",
+	"dirty_files",
+	"prompt",
+	"agentic",
+	"prompt_prebuilt",
+	"output_prefix",
+	"parent_job_id",
+	"uuid",
+	"source_machine_id",
+	"updated_at",
+	"worktree_path",
+	"min_severity",
+	"backup_agent",
+	"backup_model",
+	"panel_run_uuid",
+	"panel_role",
+	"panel_name",
+	"panel_member_name",
+	"panel_member_index",
+	"panel_member_config_json",
+	"claim_blocked",
+	"source",
 }
 
 type jobRow struct {
 	bun.BaseModel `bun:"table:review_jobs,alias:j"`
 
-	ID                    int64     `bun:"id,pk,autoincrement"`
-	RepoID                int64     `bun:"repo_id"`
-	CommitID              *int64    `bun:"commit_id"`
-	GitRef                string    `bun:"git_ref"`
-	Branch                *string   `bun:"branch"`
-	CIBaseBranch          *string   `bun:"ci_base_branch"`
-	SessionID             *string   `bun:"session_id"`
-	Agent                 string    `bun:"agent"`
-	Model                 *string   `bun:"model"`
-	Provider              *string   `bun:"provider"`
-	RequestedModel        *string   `bun:"requested_model"`
-	RequestedProvider     *string   `bun:"requested_provider"`
-	Reasoning             *string   `bun:"reasoning"`
-	JobType               string    `bun:"job_type"`
-	ReviewType            string    `bun:"review_type"`
-	PatchID               *string   `bun:"patch_id"`
-	Status                JobStatus `bun:"status"`
-	Agentic               bool      `bun:"agentic"`
-	AgentInvoked          bool      `bun:"agent_invoked"`
-	EnqueuedAt            dbTime    `bun:"enqueued_at"`
-	StartedAt             dbTime    `bun:"started_at"`
-	FinishedAt            dbTime    `bun:"finished_at"`
-	RetryNotBefore        dbTime    `bun:"retry_not_before"`
-	WorkerID              *string   `bun:"worker_id"`
-	Error                 *string   `bun:"error"`
-	Prompt                *string   `bun:"prompt"`
-	RetryCount            int       `bun:"retry_count"`
-	DiffContent           *string   `bun:"diff_content"`
-	DirtyFiles            *string   `bun:"dirty_files"`
-	OutputPrefix          *string   `bun:"output_prefix"`
-	SkipReason            *string   `bun:"skip_reason"`
-	Source                *string   `bun:"source"`
-	ParentJobID           *int64    `bun:"parent_job_id"`
-	Patch                 *string   `bun:"patch"`
-	WorktreePath          *string   `bun:"worktree_path"`
-	CommandLine           *string   `bun:"command_line"`
-	PromptPrebuilt        bool      `bun:"prompt_prebuilt"`
-	MinSeverity           string    `bun:"min_severity"`
-	BackupAgent           string    `bun:"backup_agent"`
-	BackupModel           string    `bun:"backup_model"`
-	PanelRunUUID          *string   `bun:"panel_run_uuid"`
-	PanelRole             *string   `bun:"panel_role"`
-	PanelName             *string   `bun:"panel_name"`
-	PanelMemberName       *string   `bun:"panel_member_name"`
-	PanelMemberIndex      *int      `bun:"panel_member_index"`
-	PanelMemberConfigJSON *string   `bun:"panel_member_config_json"`
-	ClaimBlocked          bool      `bun:"claim_blocked"`
-	TokenUsage            *string   `bun:"token_usage"`
-	UUID                  *string   `bun:"uuid"`
-	SourceMachineID       *string   `bun:"source_machine_id"`
-	CreatedAt             dbTime    `bun:"created_at"`
-	UpdatedAt             dbTime    `bun:"updated_at"`
-	SyncedAt              dbTime    `bun:"synced_at"`
+	ID                    int64       `bun:"id,pk,autoincrement"`
+	RepoID                int64       `bun:"repo_id"`
+	CommitID              *int64      `bun:"commit_id"`
+	GitRef                string      `bun:"git_ref"`
+	Branch                *string     `bun:"branch"`
+	CIBaseBranch          *string     `bun:"ci_base_branch"`
+	SessionID             *string     `bun:"session_id"`
+	Agent                 string      `bun:"agent"`
+	Model                 *string     `bun:"model"`
+	Provider              *string     `bun:"provider"`
+	RequestedModel        *string     `bun:"requested_model"`
+	RequestedProvider     *string     `bun:"requested_provider"`
+	Reasoning             *string     `bun:"reasoning"`
+	JobType               string      `bun:"job_type"`
+	ReviewType            string      `bun:"review_type"`
+	PatchID               *string     `bun:"patch_id"`
+	Status                JobStatus   `bun:"status"`
+	Agentic               bool        `bun:"agentic"`
+	AgentInvoked          bool        `bun:"agent_invoked"`
+	EnqueuedAt            dbTime      `bun:"enqueued_at"`
+	StartedAt             dbTime      `bun:"started_at"`
+	FinishedAt            dbTime      `bun:"finished_at"`
+	RetryNotBefore        dbRetryTime `bun:"retry_not_before"`
+	WorkerID              *string     `bun:"worker_id"`
+	Error                 *string     `bun:"error"`
+	Prompt                *string     `bun:"prompt"`
+	RetryCount            int         `bun:"retry_count"`
+	DiffContent           *string     `bun:"diff_content"`
+	DirtyFiles            *string     `bun:"dirty_files"`
+	OutputPrefix          *string     `bun:"output_prefix"`
+	SkipReason            *string     `bun:"skip_reason"`
+	Source                *string     `bun:"source"`
+	ParentJobID           *int64      `bun:"parent_job_id"`
+	Patch                 *string     `bun:"patch"`
+	WorktreePath          *string     `bun:"worktree_path"`
+	CommandLine           *string     `bun:"command_line"`
+	PromptPrebuilt        bool        `bun:"prompt_prebuilt"`
+	MinSeverity           string      `bun:"min_severity"`
+	BackupAgent           string      `bun:"backup_agent"`
+	BackupModel           string      `bun:"backup_model"`
+	PanelRunUUID          *string     `bun:"panel_run_uuid"`
+	PanelRole             *string     `bun:"panel_role"`
+	PanelName             *string     `bun:"panel_name"`
+	PanelMemberName       *string     `bun:"panel_member_name"`
+	PanelMemberIndex      *int        `bun:"panel_member_index"`
+	PanelMemberConfigJSON *string     `bun:"panel_member_config_json"`
+	ClaimBlocked          bool        `bun:"claim_blocked"`
+	TokenUsage            *string     `bun:"token_usage"`
+	UUID                  *string     `bun:"uuid"`
+	SourceMachineID       *string     `bun:"source_machine_id"`
+	CreatedAt             dbTime      `bun:"created_at"`
+	UpdatedAt             dbTime      `bun:"updated_at"`
+	SyncedAt              dbTime      `bun:"synced_at"`
 }
 
+// jobRowFromModel maps fields owned by the public ReviewJob model. Callers
+// must use operation-specific column lists; model-wide updates are forbidden
+// because local runtime fields such as agent_invoked and retry_not_before are
+// intentionally not represented by ReviewJob.
 func jobRowFromModel(job ReviewJob) jobRow {
 	dirtyFiles, _ := encodeDirtyFiles(job.DirtyFiles)
 	row := jobRow{

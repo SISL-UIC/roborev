@@ -127,9 +127,39 @@ normalization, and boolean representation.
 
 Persisted timestamps use a private scanner/value type rather than plain
 `time.Time` fields. The scanner accepts native PostgreSQL `time.Time` values,
-RFC3339 strings and bytes, and the historical bare SQLite datetime format. It
-normalizes each valid value to `time.Time` without forcing PostgreSQL through a
-string-only projection. Nullable timestamps carry an explicit validity bit.
+RFC3339 strings and bytes, the historical bare SQLite datetime format, and the
+offset-bearing format produced when SQLite drivers receive `time.Time`. General
+timestamp writes are normalized to UTC and encoded as RFC3339Nano text; invalid
+values bind as SQL `NULL`. PostgreSQL coerces that value to its native timestamp
+type and returns native `time.Time` values on reads, so PostgreSQL projections
+do not stringify timestamps.
+
+`retry_not_before` is deliberately not a general timestamp. SQLite orders it
+lexicographically in the claim predicate, so a separate local-only value type
+writes `retryNotBeforeLayout`: UTC with exactly nine fractional digits. It is
+excluded from the PostgreSQL synchronization projection.
+
+Column lists describe operation roles, not every physical column. The SQLite
+list covers local persisted fields. The PostgreSQL job list is the sync
+projection and excludes checkout/scheduling state such as `branch`,
+`retry_not_before`, `skip_reason`, and `created_at`, while retaining the
+synchronized `agent_invoked` signal. Inserts, listings, details, transitions,
+and sync operations each use an explicit subset; model-wide updates are
+forbidden because the public domain model does not own every persisted field.
+
+### Mixed-path compatibility contract
+
+| Concern | Required behavior before removing a legacy path |
+| --- | --- |
+| General timestamps | Bun writes UTC RFC3339Nano, legacy SQLite readers parse it, PostgreSQL reads remain native timestamps, and invalid values bind as `NULL`. |
+| Retry scheduling | Bun writes fixed-width UTC `retryNotBeforeLayout`, and the real SQLite claim predicate preserves chronological ordering. |
+| Defaults | Inserts omit database-owned columns such as IDs and creation timestamps rather than writing zero values. |
+| Nulls and booleans | Nullable fields round-trip through pointers/validity bits; SQLite integer booleans and PostgreSQL native booleans map to the same domain values. |
+| Conflicts | Converted inserts preserve the existing idempotent or field-specific conflict policy under concurrent callers. |
+| Empty results | Existing `sql.ErrNoRows`, nil slice, empty slice, and zero-value contracts remain unchanged per method. |
+
+A legacy query family is removed only after its focused behavior tests and the
+storage package pass with the Bun path as the sole implementation.
 
 ### Dialect policy
 
