@@ -382,7 +382,7 @@ func (db *DB) ListRepos() ([]Repo, error) {
 		return nil, err
 	}
 
-	repos := make([]Repo, 0, len(rows))
+	var repos []Repo
 	for _, row := range rows {
 		repos = append(repos, row.toModel())
 	}
