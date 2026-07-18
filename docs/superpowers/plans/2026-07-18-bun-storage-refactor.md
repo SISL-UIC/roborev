@@ -9,8 +9,9 @@
 Bun-backed storage layer while preserving SQLite-primary, PostgreSQL-sync
 behavior and the existing storage API.
 
-**Architecture:** `storage.DB` embeds `*bun.DB`, which itself retains the
-existing `*sql.DB` compatibility surface. `PgPool` keeps its
+**Architecture:** `storage.DB` continues to embed `*sql.DB` and adds a private
+`*bun.DB` over the same handle, preserving exact transaction method signatures.
+`PgPool` keeps its
 `*pgxpool.Pool`, wraps it with `stdlib.OpenDBFromPool`, and gives the wrapper to
 Bun so Bun queries and retained pgx batches share one pool. Private canonical
 row models and mapping helpers are shared by the local and sync paths, while
@@ -52,7 +53,7 @@ dialects, modernc SQLite, pgx v5/pgxpool, testify.
 
 **Interfaces:**
 
-- Produces: `type DB struct { *bun.DB }`
+- Produces: `type DB struct { *sql.DB; bun *bun.DB }`
 - Produces: `func newSQLiteBunDB(*sql.DB) *bun.DB`
 - Produces: `func newPostgresBunDB(*sql.DB) *bun.DB`
 - Preserves: `func Open(string) (*DB, error)`
@@ -75,7 +76,7 @@ func TestOpenBunHandleSharesSQLiteDatabase(t *testing.T) {
 	require.NoError(t, err)
 
 	var count int
-	err = db.NewRaw("SELECT COUNT(*) FROM repos WHERE id = ?", repo.ID).Scan(t.Context(), &count)
+	err = db.bun.NewRaw("SELECT COUNT(*) FROM repos WHERE id = ?", repo.ID).Scan(t.Context(), &count)
 	require.NoError(t, err)
 	assert.Equal(t, 1, count)
 }
@@ -89,7 +90,7 @@ Run:
 go test ./internal/storage -run TestOpenBunHandleSharesSQLiteDatabase -count=1
 ```
 
-Expected: FAIL because `DB` does not expose Bun query construction yet.
+Expected: FAIL because `DB` does not own a Bun handle yet.
 
 - [ ] **Step 3: Add Bun dependencies**
 
@@ -107,7 +108,8 @@ Change the SQLite handle and constructor in `internal/storage/db.go`:
 
 ```go
 type DB struct {
-	*bun.DB
+	*sql.DB
+	bun *bun.DB
 }
 
 func newSQLiteBunDB(sqldb *sql.DB) *bun.DB {
@@ -115,9 +117,10 @@ func newSQLiteBunDB(sqldb *sql.DB) *bun.DB {
 }
 ```
 
-In `Open`, construct `sqldb`, wrap it once, and use `wrapped.Close()` on every
-error path. Existing promoted `Exec`, `Query`, `QueryRow`, `Begin`, and
-`Prepare` calls continue to resolve through Bun's embedded `*sql.DB`.
+In `Open`, construct `sqldb`, wrap it once, and store both handles in `DB`.
+Existing promoted `Exec`, `Query`, `QueryRow`, `Begin`, and `Prepare` calls
+continue to resolve directly through the embedded `*sql.DB`, including the
+existing `Begin() (*sql.Tx, error)` signature.
 
 - [ ] **Step 5: Wrap the existing pgx pool with Bun**
 
@@ -125,9 +128,8 @@ Extend `PgPool` in `internal/storage/postgres.go`:
 
 ```go
 type PgPool struct {
-	pool  *pgxpool.Pool
-	sqldb *sql.DB
-	db    *bun.DB
+	pool *pgxpool.Pool
+	bun  *bun.DB
 }
 
 func newPostgresBunDB(sqldb *sql.DB) *bun.DB {
