@@ -8,6 +8,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/uptrace/bun"
+
 	"go.kenn.io/roborev/internal/config"
 )
 
@@ -159,19 +161,22 @@ func (db *DB) BackfillSourceMachineID() error {
 	}
 
 	// Backfill review_jobs
-	_, err = db.Exec(`UPDATE review_jobs SET source_machine_id = ? WHERE source_machine_id IS NULL`, machineID)
+	_, err = db.bun.NewUpdate().Model((*jobRow)(nil)).Set("source_machine_id = ?", machineID).
+		Where("source_machine_id IS NULL").Exec(context.Background())
 	if err != nil {
 		return fmt.Errorf("backfill review_jobs source_machine_id: %w", err)
 	}
 
 	// Backfill reviews (updated_by_machine_id)
-	_, err = db.Exec(`UPDATE reviews SET updated_by_machine_id = ? WHERE updated_by_machine_id IS NULL`, machineID)
+	_, err = db.bun.NewUpdate().Model((*reviewRow)(nil)).Set("updated_by_machine_id = ?", machineID).
+		Where("updated_by_machine_id IS NULL").Exec(context.Background())
 	if err != nil {
 		return fmt.Errorf("backfill reviews updated_by_machine_id: %w", err)
 	}
 
 	// Backfill responses
-	_, err = db.Exec(`UPDATE responses SET source_machine_id = ? WHERE source_machine_id IS NULL`, machineID)
+	_, err = db.bun.NewUpdate().Model((*responseRow)(nil)).Set("source_machine_id = ?", machineID).
+		Where("source_machine_id IS NULL").Exec(context.Background())
 	if err != nil {
 		return fmt.Errorf("backfill responses source_machine_id: %w", err)
 	}
@@ -184,15 +189,15 @@ func (db *DB) BackfillSourceMachineID() error {
 // all data gets re-synced.
 func (db *DB) ClearAllSyncedAt() error {
 	// Clear synced_at on review_jobs
-	if _, err := db.Exec(`UPDATE review_jobs SET synced_at = NULL`); err != nil {
+	if _, err := db.bun.NewUpdate().Model((*jobRow)(nil)).Set("synced_at = NULL").Where("1 = 1").Exec(context.Background()); err != nil {
 		return fmt.Errorf("clear review_jobs synced_at: %w", err)
 	}
 	// Clear synced_at on reviews
-	if _, err := db.Exec(`UPDATE reviews SET synced_at = NULL`); err != nil {
+	if _, err := db.bun.NewUpdate().Model((*reviewRow)(nil)).Set("synced_at = NULL").Where("1 = 1").Exec(context.Background()); err != nil {
 		return fmt.Errorf("clear reviews synced_at: %w", err)
 	}
 	// Clear synced_at on responses
-	if _, err := db.Exec(`UPDATE responses SET synced_at = NULL`); err != nil {
+	if _, err := db.bun.NewUpdate().Model((*responseRow)(nil)).Set("synced_at = NULL").Where("1 = 1").Exec(context.Background()); err != nil {
 		return fmt.Errorf("clear responses synced_at: %w", err)
 	}
 	return nil
@@ -472,8 +477,9 @@ func (db *DB) GetJobsToSync(machineID string, limit int) ([]SyncableJob, error) 
 
 // MarkJobSynced updates the synced_at timestamp for a job
 func (db *DB) MarkJobSynced(jobID int64) error {
-	now := time.Now().UTC().Format(time.RFC3339)
-	_, err := db.Exec(`UPDATE review_jobs SET synced_at = ? WHERE id = ?`, now, jobID)
+	now := dbTimeFromValue(time.Now())
+	_, err := db.bun.NewUpdate().Model((*jobRow)(nil)).Set("synced_at = ?", now).
+		Where("id = ?", jobID).Exec(context.Background())
 	return err
 }
 
@@ -546,34 +552,23 @@ func (db *DB) MarkJobsSynced(marks []JobSyncMark) error {
 	if len(marks) == 0 {
 		return nil
 	}
-	now := time.Now().UTC().Format(time.RFC3339)
-	tx, err := db.Begin()
+	now := dbTimeFromValue(time.Now())
+	tx, err := db.bun.BeginTx(context.Background(), nil)
 	if err != nil {
 		return fmt.Errorf("begin mark jobs synced: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	stmt, err := tx.Prepare(
-		`UPDATE review_jobs SET synced_at = ?
-		 WHERE id = ? AND updated_at = ? AND COALESCE(token_usage, '') = ?
-		   AND status = ? AND COALESCE(session_id, '') = ? AND agent_invoked = ?
-		   AND agent = ? AND COALESCE(model, '') = ? AND COALESCE(provider, '') = ?
-		   AND COALESCE(error, '') = ? AND COALESCE(started_at, '') = ?
-		   AND COALESCE(finished_at, '') = ?`)
-	if err != nil {
-		return fmt.Errorf("prepare mark jobs synced: %w", err)
-	}
-	defer stmt.Close()
-
 	for _, m := range marks {
-		invoked := 0
-		if m.AgentInvoked {
-			invoked = 1
-		}
-		if _, err := stmt.Exec(
-			now, m.ID, m.UpdatedAt, m.TokenUsage, m.Status, m.SessionID, invoked,
-			m.Agent, m.Model, m.Provider, m.Error, m.StartedAtRaw, m.FinishedAtRaw,
-		); err != nil {
+		if _, err := db.bun.NewUpdate().Model((*jobRow)(nil)).Conn(tx).
+			Set("synced_at = ?", now).Where("id = ?", m.ID).Where("updated_at = ?", m.UpdatedAt).
+			Where("COALESCE(token_usage, '') = ?", m.TokenUsage).Where("status = ?", m.Status).
+			Where("COALESCE(session_id, '') = ?", m.SessionID).Where("agent_invoked = ?", m.AgentInvoked).
+			Where("agent = ?", m.Agent).Where("COALESCE(model, '') = ?", m.Model).
+			Where("COALESCE(provider, '') = ?", m.Provider).Where("COALESCE(error, '') = ?", m.Error).
+			Where("COALESCE(started_at, '') = ?", m.StartedAtRaw).
+			Where("COALESCE(finished_at, '') = ?", m.FinishedAtRaw).
+			Exec(context.Background()); err != nil {
 			return fmt.Errorf("mark job %d synced: %w", m.ID, err)
 		}
 	}
@@ -641,8 +636,9 @@ func (db *DB) GetReviewsToSync(machineID string, limit int) ([]SyncableReview, e
 
 // MarkReviewSynced updates the synced_at timestamp for a review
 func (db *DB) MarkReviewSynced(reviewID int64) error {
-	now := time.Now().UTC().Format(time.RFC3339)
-	_, err := db.Exec(`UPDATE reviews SET synced_at = ? WHERE id = ?`, now, reviewID)
+	now := dbTimeFromValue(time.Now())
+	_, err := db.bun.NewUpdate().Model((*reviewRow)(nil)).Set("synced_at = ?", now).
+		Where("id = ?", reviewID).Exec(context.Background())
 	return err
 }
 
@@ -651,17 +647,9 @@ func (db *DB) MarkReviewsSynced(reviewIDs []int64) error {
 	if len(reviewIDs) == 0 {
 		return nil
 	}
-	now := time.Now().UTC().Format(time.RFC3339)
-	placeholders := make([]string, len(reviewIDs))
-	args := make([]any, len(reviewIDs)+1)
-	args[0] = now
-	for i, id := range reviewIDs {
-		placeholders[i] = "?"
-		args[i+1] = id
-	}
-	query := fmt.Sprintf(`UPDATE reviews SET synced_at = ? WHERE id IN (%s)`,
-		strings.Join(placeholders, ","))
-	_, err := db.Exec(query, args...)
+	now := dbTimeFromValue(time.Now())
+	_, err := db.bun.NewUpdate().Model((*reviewRow)(nil)).Set("synced_at = ?", now).
+		Where("id IN (?)", bun.List(reviewIDs)).Exec(context.Background())
 	return err
 }
 
@@ -724,8 +712,9 @@ func (db *DB) GetCommentsToSync(machineID string, limit int) ([]SyncableResponse
 
 // MarkCommentSynced updates the synced_at timestamp for a comment
 func (db *DB) MarkCommentSynced(responseID int64) error {
-	now := time.Now().UTC().Format(time.RFC3339)
-	_, err := db.Exec(`UPDATE responses SET synced_at = ? WHERE id = ?`, now, responseID)
+	now := dbTimeFromValue(time.Now())
+	_, err := db.bun.NewUpdate().Model((*responseRow)(nil)).Set("synced_at = ?", now).
+		Where("id = ?", responseID).Exec(context.Background())
 	return err
 }
 
@@ -734,17 +723,9 @@ func (db *DB) MarkCommentsSynced(responseIDs []int64) error {
 	if len(responseIDs) == 0 {
 		return nil
 	}
-	now := time.Now().UTC().Format(time.RFC3339)
-	placeholders := make([]string, len(responseIDs))
-	args := make([]any, len(responseIDs)+1)
-	args[0] = now
-	for i, id := range responseIDs {
-		placeholders[i] = "?"
-		args[i+1] = id
-	}
-	query := fmt.Sprintf(`UPDATE responses SET synced_at = ? WHERE id IN (%s)`,
-		strings.Join(placeholders, ","))
-	_, err := db.Exec(query, args...)
+	now := dbTimeFromValue(time.Now())
+	_, err := db.bun.NewUpdate().Model((*responseRow)(nil)).Set("synced_at = ?", now).
+		Where("id IN (?)", bun.List(responseIDs)).Exec(context.Background())
 	return err
 }
 
@@ -808,7 +789,8 @@ func (db *DB) UpsertPulledJob(j PulledJob, repoID int64, commitID *int64) error 
 func (db *DB) UpsertPulledReview(r PulledReview) error {
 	// First, find the job_id by uuid
 	var jobID int64
-	err := db.QueryRow(`SELECT id FROM review_jobs WHERE uuid = ?`, r.JobUUID).Scan(&jobID)
+	err := db.bun.NewSelect().Model((*jobRow)(nil)).Column("id").Where("uuid = ?", r.JobUUID).
+		Scan(context.Background(), &jobID)
 	if errors.Is(err, sql.ErrNoRows) {
 		// Job doesn't exist locally - skip this review (orphaned)
 		return nil
@@ -844,7 +826,8 @@ func (db *DB) UpsertPulledReview(r PulledReview) error {
 func (db *DB) UpsertPulledResponse(r PulledResponse) error {
 	// First, find the job_id by uuid
 	var jobID int64
-	err := db.QueryRow(`SELECT id FROM review_jobs WHERE uuid = ?`, r.JobUUID).Scan(&jobID)
+	err := db.bun.NewSelect().Model((*jobRow)(nil)).Column("id").Where("uuid = ?", r.JobUUID).
+		Scan(context.Background(), &jobID)
 	if errors.Is(err, sql.ErrNoRows) {
 		// Job doesn't exist locally - skip this response (orphaned)
 		return nil
@@ -866,21 +849,12 @@ func (db *DB) UpsertPulledResponse(r PulledResponse) error {
 // GetKnownJobUUIDs returns UUIDs of all jobs that have a UUID.
 // Used to filter reviews when pulling from PostgreSQL.
 func (db *DB) GetKnownJobUUIDs() ([]string, error) {
-	rows, err := db.Query(`SELECT uuid FROM review_jobs WHERE uuid IS NOT NULL`)
-	if err != nil {
+	var uuids []string
+	if err := db.bun.NewSelect().Model((*jobRow)(nil)).Column("uuid").Where("uuid IS NOT NULL").
+		Scan(context.Background(), &uuids); err != nil {
 		return nil, fmt.Errorf("query job UUIDs: %w", err)
 	}
-	defer rows.Close()
-
-	var uuids []string
-	for rows.Next() {
-		var uuid string
-		if err := rows.Scan(&uuid); err != nil {
-			return nil, fmt.Errorf("scan UUID: %w", err)
-		}
-		uuids = append(uuids, uuid)
-	}
-	return uuids, rows.Err()
+	return uuids, nil
 }
 
 // GetOrCreateRepoByIdentity finds or creates a repo for syncing by identity.
