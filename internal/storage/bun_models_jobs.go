@@ -64,7 +64,6 @@ var sqliteJobColumns = []string{
 // postgresJobColumns is the synchronized PostgreSQL projection, not every
 // physical schema column. Local checkout and scheduling state stays in SQLite.
 var postgresJobColumns = []string{
-	"id",
 	"uuid",
 	"repo_id",
 	"commit_id",
@@ -514,6 +513,14 @@ func jobRowFromModel(job ReviewJob) jobRow {
 		SourceMachineID:       optionalString(job.SourceMachineID),
 		UpdatedAt:             dbTimeFromPointer(job.UpdatedAt),
 		SyncedAt:              dbTimeFromPointer(job.SyncedAt),
+	}
+	return row
+}
+
+func jobRowForInsert(job ReviewJob) jobRow {
+	row := jobRowFromModel(job)
+	if job.PanelRole == PanelRoleMember {
+		row.PanelMemberIndex = &job.PanelMemberIndex
 	}
 	return row
 }

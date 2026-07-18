@@ -114,6 +114,30 @@ func TestPanelColumnsRoundTrip(t *testing.T) {
 	assert.Equal("run-1", jobs[0].PanelRunUUID)
 }
 
+func TestEnqueuePanelMemberZeroPersistsStableIndex(t *testing.T) {
+	db := openTestDB(t)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+
+	repo := createRepo(t, db, "/tmp/panel-zero-index")
+	member, err := db.EnqueueJob(EnqueueOpts{
+		RepoID:           repo.ID,
+		GitRef:           "base..head",
+		Agent:            "test",
+		JobType:          JobTypeRange,
+		PanelRunUUID:     "run-zero-index",
+		PanelRole:        PanelRoleMember,
+		PanelMemberName:  "first",
+		PanelMemberIndex: 0,
+	})
+	require.NoError(t, err)
+
+	var stored sql.NullInt64
+	require.NoError(t, db.QueryRow(
+		`SELECT panel_member_index FROM review_jobs WHERE id = ?`, member.ID,
+	).Scan(&stored))
+	assert.Equal(t, sql.NullInt64{Int64: 0, Valid: true}, stored)
+}
+
 func TestJobTypeHelpersForSynthesis(t *testing.T) {
 	assert := assert.New(t)
 

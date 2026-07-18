@@ -1,12 +1,42 @@
 package storage
 
 import (
+	"context"
 	"database/sql"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/uptrace/bun"
 )
+
+type mutateBeforeJobReadHook struct {
+	db     *DB
+	jobID  int64
+	once   sync.Once
+	mutErr error
+}
+
+func (h *mutateBeforeJobReadHook) BeforeQuery(ctx context.Context, event *bun.QueryEvent) context.Context {
+	if !strings.Contains(event.Query, `FROM review_jobs AS j`) {
+		return ctx
+	}
+	h.once.Do(func() {
+		_, h.mutErr = h.db.Exec(`DELETE FROM reviews WHERE job_id = ?`, h.jobID)
+		if h.mutErr != nil {
+			return
+		}
+		_, h.mutErr = h.db.Exec(
+			`UPDATE review_jobs SET status = ?, finished_at = NULL WHERE id = ?`,
+			JobStatusQueued, h.jobID,
+		)
+	})
+	return ctx
+}
+
+func (h *mutateBeforeJobReadHook) AfterQuery(_ context.Context, _ *bun.QueryEvent) {}
 
 // TestAddCommentToJobAllStates verifies that comments can be added to jobs
 // in any state: queued, running, done, failed, and canceled.
@@ -69,6 +99,43 @@ func TestAddCommentToJobNonExistent(t *testing.T) {
 	_, err := db.AddCommentToJob(99999, "test-user", "This should fail")
 	require.Error(t, err)
 	assert.Equal(t, err, sql.ErrNoRows)
+}
+
+func TestGetRecentReviewsForRepoZeroLimitReturnsEmpty(t *testing.T) {
+	db := openTestDB(t)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+
+	repo, _, job := createJobChain(t, db, "/tmp/recent-review-zero-limit", "abc123")
+	setJobStatus(t, db, job.ID, JobStatusRunning)
+	require.NoError(t, db.CompleteJob(job.ID, "test", "prompt", "No issues found."))
+
+	reviews, err := db.GetRecentReviewsForRepo(repo.ID, 0)
+	require.NoError(t, err)
+	assert.Empty(t, reviews)
+}
+
+func TestGetReviewByJobIDUsesSingleReadSnapshot(t *testing.T) {
+	db := openTestDB(t)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+
+	_, _, job := createJobChain(t, db, "/tmp/review-read-snapshot", "abc123")
+	setJobStatus(t, db, job.ID, JobStatusRunning)
+	require.NoError(t, db.CompleteJob(job.ID, "test", "prompt", "No issues found."))
+
+	hook := &mutateBeforeJobReadHook{db: db, jobID: job.ID}
+	db.bun.AddQueryHook(hook)
+
+	review, err := db.GetReviewByJobID(job.ID)
+	require.NoError(t, err)
+	require.NoError(t, hook.mutErr)
+	require.NotNil(t, review.Job)
+	assert.Equal(t, JobStatusDone, review.Job.Status)
+
+	current, err := db.GetJobByID(job.ID)
+	require.NoError(t, err)
+	assert.Equal(t, JobStatusQueued, current.Status)
+	_, err = db.GetReviewByJobID(job.ID)
+	assert.ErrorIs(t, err, sql.ErrNoRows)
 }
 
 // TestAddCommentToJobMultipleComments verifies that multiple comments

@@ -16,27 +16,36 @@ import (
 
 // GetReviewByJobID finds a review by its job ID
 func (db *DB) GetReviewByJobID(jobID int64) (*Review, error) {
+	ctx := context.Background()
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
 	var reviewDB reviewRow
 	if err := db.bun.NewSelect().
 		Model(&reviewDB).
+		Conn(tx).
 		Column(
 			"id", "job_id", "agent", "prompt", "output", "created_at", "closed",
 			"uuid", "updated_at", "updated_by_machine_id", "synced_at", "verdict_bool",
 		).
 		Where("job_id = ?", jobID).
-		Scan(context.Background()); err != nil {
+		Scan(ctx); err != nil {
 		return nil, err
 	}
 	review := reviewDB.toModel()
 
 	var jobDB jobHydrationRow
 	query := db.bun.NewSelect().
+		Conn(tx).
 		TableExpr("review_jobs AS j").
 		Join("JOIN repos AS rp ON rp.id = j.repo_id").
 		Join("LEFT JOIN commits AS c ON c.id = j.commit_id").
 		Where("j.id = ?", jobID)
 	query = addJobSelectColumns(query, sqliteReviewJobColumns)
-	if err := query.Scan(context.Background(), &jobDB); err != nil {
+	if err := query.Scan(ctx, &jobDB); err != nil {
 		return nil, err
 	}
 	job := jobDB.toModel()
@@ -47,6 +56,9 @@ func (db *DB) GetReviewByJobID(jobID int64) (*Review, error) {
 	applyJobVerdict(&job, verdict, review.Output)
 
 	review.Job = &job
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
 
 	return &review, nil
 }
@@ -103,6 +115,9 @@ func (db *DB) GetAllReviewsForGitRef(gitRef string) ([]Review, error) {
 
 // GetRecentReviewsForRepo returns the N most recent reviews for a repo
 func (db *DB) GetRecentReviewsForRepo(repoID int64, limit int) ([]Review, error) {
+	if limit == 0 {
+		return nil, nil
+	}
 	var rows []reviewRow
 	if err := db.bun.NewSelect().
 		Model(&rows).
@@ -251,7 +266,7 @@ func reusableSessionCandidateTarget(gitRef, commitSHA string) string {
 
 // MarkReviewClosed marks a review as closed (or reopened) by review ID
 func (db *DB) MarkReviewClosed(reviewID int64, closed bool) error {
-	now := time.Now().Format(time.RFC3339)
+	now := dbTimeFromValue(time.Now())
 	machineID, _ := db.GetMachineID()
 
 	result, err := db.bun.NewUpdate().
@@ -276,7 +291,7 @@ func (db *DB) MarkReviewClosed(reviewID int64, closed bool) error {
 
 // MarkReviewClosedByJobID marks a review as closed (or reopened) by job ID
 func (db *DB) MarkReviewClosedByJobID(jobID int64, closed bool) error {
-	now := time.Now().Format(time.RFC3339)
+	now := dbTimeFromValue(time.Now())
 	machineID, _ := db.GetMachineID()
 
 	result, err := db.bun.NewUpdate().

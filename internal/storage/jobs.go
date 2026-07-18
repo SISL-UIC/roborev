@@ -201,7 +201,7 @@ func (db *DB) insertJobTx(ctx context.Context, exec execer, opts EnqueueOpts, ui
 		job.DiffContent = &opts.DiffContent
 	}
 
-	row := jobRowFromModel(*job)
+	row := jobRowForInsert(*job)
 	insert := db.bun.NewInsert().
 		Model(&row).
 		Column(sqliteJobInsertColumns...)
@@ -292,7 +292,7 @@ func (db *DB) enqueuePanelRunTx(ctx context.Context, exec execer, members []Enqu
 // attempt.
 func (db *DB) ClaimJob(workerID string) (*ReviewJob, error) {
 	now := time.Now()
-	nowStr := now.Format(time.RFC3339)
+	nowStr := dbTimeFromValue(now)
 	// retry_not_before is stored UTC + fixed-width nano (see
 	// retryNotBeforeLayout) so the SQL comparison stays monotonic with
 	// time. Format the comparison value the same way.
@@ -398,7 +398,7 @@ func (db *DB) SaveJobSessionID(
 	if sessionID == "" {
 		return nil
 	}
-	now := time.Now().Format(time.RFC3339)
+	now := dbTimeFromValue(time.Now())
 	_, err := db.bun.NewUpdate().
 		Model((*jobRow)(nil)).
 		Set("session_id = ?", sessionID).
@@ -436,7 +436,7 @@ func (db *DB) SaveJobTokenUsage(jobID int64, sessionID, tokenUsageJSON string) e
 	if tokenUsageJSON == "" {
 		return nil
 	}
-	now := time.Now().Format(time.RFC3339)
+	now := dbTimeFromValue(time.Now())
 	_, err := db.bun.NewUpdate().
 		Model((*jobRow)(nil)).
 		Set("token_usage = ?", tokenUsageJSON).
@@ -456,7 +456,7 @@ func (db *DB) BackfillJobTokenUsage(jobID int64, sessionID, tokenUsageJSON strin
 	if tokenUsageJSON == "" {
 		return nil
 	}
-	now := time.Now().Format(time.RFC3339)
+	now := dbTimeFromValue(time.Now())
 	_, err := db.bun.NewUpdate().
 		Model((*jobRow)(nil)).
 		Set("token_usage = ?", tokenUsageJSON).
@@ -478,7 +478,7 @@ func (db *DB) BackfillJobTokenUsage(jobID int64, sessionID, tokenUsageJSON strin
 // states where a patch is written but the job isn't done, or vice versa.
 func (db *DB) CompleteFixJob(jobID int64, agent, prompt, output, patch string) error {
 	nowTime := time.Now()
-	now := nowTime.Format(time.RFC3339)
+	now := dbTimeFromValue(nowTime)
 	machineID, _ := db.GetMachineID()
 	reviewUUID := GenerateUUID()
 
@@ -583,7 +583,7 @@ func (db *DB) CompleteJob(jobID int64, agent, prompt, output string) error {
 	// Get machine ID and generate UUIDs before starting transaction
 	// to avoid potential lock conflicts with GetMachineID's writes
 	nowTime := time.Now()
-	now := nowTime.Format(time.RFC3339)
+	now := dbTimeFromValue(nowTime)
 	machineID, _ := db.GetMachineID()
 	reviewUUID := GenerateUUID()
 
@@ -697,7 +697,7 @@ func (db *DB) CompleteJob(jobID int64, agent, prompt, output string) error {
 // Returns true if the job was actually updated (false when ownership or status
 // check prevented the update).
 func (db *DB) FailJob(jobID int64, workerID string, errorMsg string) (bool, error) {
-	now := time.Now().Format(time.RFC3339)
+	now := dbTimeFromValue(time.Now())
 	query := db.bun.NewUpdate().
 		Model((*jobRow)(nil)).
 		Set("status = ?", JobStatusFailed).
@@ -722,7 +722,7 @@ func (db *DB) FailJob(jobID int64, workerID string, errorMsg string) (bool, erro
 
 // CancelJob marks a running or queued job as canceled
 func (db *DB) CancelJob(jobID int64) error {
-	now := time.Now().Format(time.RFC3339)
+	now := dbTimeFromValue(time.Now())
 	result, err := db.bun.NewUpdate().
 		Model((*jobRow)(nil)).
 		Set("status = ?", JobStatusCanceled).
@@ -746,7 +746,7 @@ func (db *DB) CancelJob(jobID int64) error {
 
 // MarkJobApplied transitions a fix job from done to applied.
 func (db *DB) MarkJobApplied(jobID int64) error {
-	now := time.Now().Format(time.RFC3339)
+	now := dbTimeFromValue(time.Now())
 	result, err := db.bun.NewUpdate().
 		Model((*jobRow)(nil)).
 		Set("status = ?", JobStatusApplied).
@@ -771,7 +771,7 @@ func (db *DB) MarkJobApplied(jobID int64) error {
 // MarkJobRebased transitions a done fix job to the "rebased" terminal state.
 // This indicates the patch was stale and a new rebase job was triggered.
 func (db *DB) MarkJobRebased(jobID int64) error {
-	now := time.Now().Format(time.RFC3339)
+	now := dbTimeFromValue(time.Now())
 	result, err := db.bun.NewUpdate().
 		Model((*jobRow)(nil)).
 		Set("status = ?", JobStatusRebased).
@@ -834,7 +834,7 @@ func (db *DB) ReenqueueJob(jobID int64, opts ReenqueueOpts) error {
 		return err
 	}
 
-	nowStr := time.Now().Format(time.RFC3339)
+	nowStr := dbTimeFromValue(time.Now())
 
 	// Reset job status and replace effective execution settings with the
 	// newly resolved values for this rerun. Clear prompt_prebuilt and prompt
@@ -1402,7 +1402,7 @@ func (db *DB) UpdateJobBranch(jobID int64, branch string) (int64, error) {
 func (db *DB) RemapJobGitRef(
 	repoID int64, oldSHA, newSHA, patchID string, newCommitID int64,
 ) (int, error) {
-	now := time.Now().Format(time.RFC3339)
+	now := dbTimeFromValue(time.Now())
 	result, err := db.bun.NewUpdate().
 		Model((*jobRow)(nil)).
 		Set("git_ref = ?", newSHA).
@@ -1484,7 +1484,7 @@ func (db *DB) RemapJob(
 		return 0, fmt.Errorf("find commit: %w", err)
 	}
 
-	now := time.Now().Format(time.RFC3339)
+	now := dbTimeFromValue(time.Now())
 	result, err := db.bun.NewUpdate().
 		Model((*jobRow)(nil)).
 		Conn(tx).
@@ -1699,7 +1699,7 @@ func (db *DB) PromoteClassifyToDesignReview(classifyJobID int64, workerID, agent
 		Set("prompt = NULL").
 		Set("prompt_prebuilt = 0").
 		Set("error = NULL").
-		Set("updated_at = ?", time.Now().Format(time.RFC3339)).
+		Set("updated_at = ?", dbTimeFromValue(time.Now())).
 		Where("id = ?", classifyJobID).
 		Where("job_type = ?", JobTypeClassify).
 		Where("source = ?", JobSourceAutoDesign).
@@ -1729,7 +1729,7 @@ func (db *DB) PromoteClassifyToDesignReview(classifyJobID int64, workerID, agent
 // skip is caused by a classifier failure — pass "" on the clean "no
 // design review needed" path.
 func (db *DB) MarkClassifyAsSkippedDesign(classifyJobID int64, workerID, reason, errorDetail string) error {
-	now := time.Now().Format(time.RFC3339)
+	now := dbTimeFromValue(time.Now())
 	res, err := db.bun.NewUpdate().
 		Model((*jobRow)(nil)).
 		Set("job_type = ?", JobTypeReview).
@@ -1799,7 +1799,7 @@ func (db *DB) MaybeReleasePanelSynthesis(panelRunUUID string) error {
 	if panelRunUUID == "" {
 		return nil
 	}
-	now := time.Now().Format(time.RFC3339)
+	now := dbTimeFromValue(time.Now())
 	// Raw SQL allowlist: guarded atomic state transition. The correlated
 	// terminal-member check and synthesis release must be evaluated in the
 	// same statement so concurrent member completions cannot release early.

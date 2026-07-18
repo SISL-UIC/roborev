@@ -172,6 +172,7 @@ func TestReviewJobRowRoundTripPreservesPersistedFields(t *testing.T) {
 
 func TestJobColumnSetsDocumentStoreRoles(t *testing.T) {
 	assert.Contains(t, sqliteJobColumns, "worker_id")
+	assert.NotContains(t, postgresJobColumns, "id")
 	assert.NotContains(t, postgresJobColumns, "worker_id")
 	assert.Contains(t, postgresJobColumns, "source_machine_id")
 	assert.Contains(t, postgresJobColumns, "agent_invoked")

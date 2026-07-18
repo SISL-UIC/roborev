@@ -9,8 +9,10 @@ database, and PostgreSQL remains an optional central synchronization store.
 The refactor introduces one canonical logical data model and shared persistence
 building blocks without forcing SQLite and PostgreSQL to have identical physical
 schemas. The existing `storage.DB` API remains stable for daemon, CLI, and TUI
-callers. Targeted raw SQL remains allowed for migrations and operations whose
-atomic semantics are clearer or safer in explicit SQL.
+callers. Targeted raw SQL remains allowed for migrations, transaction control,
+atomic claims, and statements Bun builders cannot express safely. Ordinary
+single-statement guarded updates may use Bun builders even when callers inspect
+`RowsAffected`; the predicate and update remain one atomic database statement.
 
 ## Motivation
 
@@ -128,16 +130,27 @@ normalization, and boolean representation.
 Persisted timestamps use a private scanner/value type rather than plain
 `time.Time` fields. The scanner accepts native PostgreSQL `time.Time` values,
 RFC3339 strings and bytes, the historical bare SQLite datetime format, and the
-offset-bearing format produced when SQLite drivers receive `time.Time`. General
-timestamp writes are normalized to UTC and encoded as RFC3339Nano text; invalid
-values bind as SQL `NULL`. PostgreSQL coerces that value to its native timestamp
-type and returns native `time.Time` values on reads, so PostgreSQL projections
-do not stringify timestamps.
+offset-bearing format produced when SQLite drivers receive `time.Time`.
+Converted Go-bound writes for general timestamp columns use `dbTime`, which
+normalizes valid values to UTC RFC3339Nano and binds invalid values as SQL
+`NULL`. PostgreSQL coerces that value to its native timestamp type and returns
+native `time.Time` values on reads, so PostgreSQL projections do not stringify
+timestamps. A legacy path may keep its previous formatting only until that path
+is converted; conversion must not introduce another ad hoc formatter.
 
 `retry_not_before` is deliberately not a general timestamp. SQLite orders it
 lexicographically in the claim predicate, so a separate local-only value type
 writes `retryNotBeforeLayout`: UTC with exactly nine fractional digits. It is
 excluded from the PostgreSQL synchronization projection.
+
+Timestamp policy is determined by the column's database role:
+
+| Columns / path | Write policy |
+| --- | --- |
+| General Go-bound timestamps such as `enqueued_at`, `started_at`, `finished_at`, `created_at`, `updated_at`, and `synced_at` | Converted Bun paths bind `dbTime` and therefore write canonical UTC RFC3339Nano. Readers continue accepting all historical SQLite formats. |
+| `retry_not_before` | Bind `dbRetryTime` using fixed-width UTC `retryNotBeforeLayout`, because SQLite compares the stored text lexicographically. |
+| CI posting lease/finalization timestamps written by SQLite `datetime('now')` | Keep the SQLite expression and compare through SQLite `datetime(...)`; these state-machine fields intentionally retain database-generated second precision. |
+| Native PostgreSQL timestamp columns | Bind `dbTime`; PostgreSQL stores and returns its native timestamp representation. |
 
 Column lists describe operation roles, not every physical column. The SQLite
 list covers local persisted fields. The PostgreSQL job list is the sync

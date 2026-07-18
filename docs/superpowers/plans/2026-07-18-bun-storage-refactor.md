@@ -31,9 +31,11 @@ dialects, modernc SQLite, pgx v5/pgxpool, testify.
 - Keep Bun query logging disabled by default.
 - Preserve metadata-only projections, keyset cursor ordering, sync conflict
   policies, transaction boundaries, and existing error behavior.
-- Raw SQL is limited to migrations, schema inspection, pragmas, guarded atomic
-  transitions, complex conflict updates, database-native cursor expressions,
-  and pgx batches with per-item result semantics.
+- Raw SQL is limited to migrations, schema inspection, pragmas, SQLite
+  transaction control, atomic claims, complex statements builders cannot
+  express safely, database-native cursor expressions, and pgx batches with
+  per-item result semantics. Ordinary guarded single-statement updates may use
+  Bun builders even when `RowsAffected` is part of their public contract.
 - Use testify assertions and the repository's test-isolation conventions.
 - Do not add tests for Bun library behavior or generated SQL strings.
 - Do not modify database schemas unless a concrete blocker is found; if one is
@@ -422,40 +424,64 @@ type, job type, minimum ID, panel run/role, classify-job exclusion, ordering,
 cursor, and limit semantics. Implement `WithoutPrompt()` by selecting the same
 explicit column list minus `prompt`; never hydrate then discard it.
 
-- [x] **Step 4: Commit job creation and query conversion**
+- [x] **Step 4: Run job creation/query parity tests, then commit those checkpoints**
+
+Verify `sql.ErrNoRows`, nil versus empty results, omitted prompt projections,
+nullable IDs, and insert defaults before committing. Keep creation and query
+conversion as separate commits so either family can be reverted independently.
 
 ```bash
 git add internal/storage/jobs.go internal/storage/bun_models_jobs.go \
   internal/storage/*job*_test.go internal/storage/db_filter_test.go
-git commit -m "Move job creation and queries to Bun"
+git commit -m "Move job creation to Bun"
+git commit -m "Move job queries to Bun"
 ```
 
 - [x] **Step 5: Convert guarded job transitions**
 
-Use Bun updates for ordinary transitions. Keep raw Bun queries for atomic claims
-and compare-and-set updates where affected-row counts are part of correctness.
-Add an allowlist comment above each retained raw statement.
+Use Bun builders for ordinary single-statement guarded transitions, including
+updates whose affected-row count is checked. Keep raw Bun queries for atomic
+claims, SQLite transaction control, and multi-part or expression-heavy
+statements builders cannot express safely. Add an allowlist comment above each
+retained raw statement. Inventory simple field writes, terminal transitions,
+retry/failover, rerun/remap transactions, and auto-design/panel operations
+separately while implementing them.
 
-- [x] **Step 6: Commit job transition conversion**
+- [x] **Step 6: Run transition parity tests, then commit job transitions**
+
+Verify stale-worker predicates, affected-row behavior, rollback behavior,
+nullable session fields, and timestamp parsing before committing.
 
 ```bash
 git add internal/storage/jobs.go internal/storage/db_job_test.go
 git commit -m "Move job transitions to Bun"
 ```
 
-- [x] **Step 7: Convert review and response persistence**
+- [x] **Step 7: Convert and validate review/response writes**
 
 Use Bun inserts and selects with explicit columns. Preserve one-review-per-job,
 closed-state updates, append-only response semantics, sync timestamps, and
-review verdict backfills.
+review verdict backfills. Run focused completion, close/reopen, and comment
+tests before proceeding.
 
-- [x] **Step 8: Convert hydration, verdict, and cost queries**
+- [x] **Step 8: Convert and validate basic review reads**
+
+Preserve `sql.ErrNoRows`, nullable verdicts, zero-versus-null commit IDs, zero
+limits, and the single-snapshot contract of joined review/job hydration.
+
+- [x] **Step 9: Convert and validate panel hydration**
+
+Preserve empty-slice shape, nullable panel metadata, member index zero, and
+member ordering before proceeding.
+
+- [x] **Step 10: Convert and validate cost aggregation**
 
 Keep aggregate work in SQL/Bun query builders; do not load rows and aggregate in
 Go. Preserve current `COALESCE`, timing, and agent-invocation eligibility
-semantics.
+semantics. Cover malformed or absent token JSON, integer/real SQLite aggregate
+types, and all-null `MIN(started_at)`.
 
-- [x] **Step 9: Run focused and package tests**
+- [x] **Step 11: Remove superseded scanners and run package tests**
 
 ```bash
 go test ./internal/storage -run \
@@ -465,7 +491,7 @@ go test ./internal/storage -count=1
 
 Expected: PASS.
 
-- [x] **Step 10: Commit review and hydration conversion**
+- [x] **Step 12: Commit review persistence conversion**
 
 ```bash
 git add internal/storage/jobs.go internal/storage/reviews.go \
