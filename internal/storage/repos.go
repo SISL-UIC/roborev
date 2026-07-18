@@ -552,10 +552,9 @@ var ErrRepoHasJobs = errors.New("repository has existing jobs; use cascade to de
 // If cascade is true, also deletes all jobs, reviews, and responses for the repo
 // If cascade is false and jobs exist, returns ErrRepoHasJobs
 func (db *DB) DeleteRepo(repoID int64, cascade bool) error {
-	// Raw SQL retained: SQLite BEGIN IMMEDIATE and the ordered multi-table
-	// cascade must run on one dedicated database/sql connection.
-	// Use a dedicated connection with BEGIN IMMEDIATE for proper locking
-	// This ensures no job can be enqueued between the count check and delete
+	// SQLite transaction control remains raw so BEGIN IMMEDIATE acquires the
+	// write lock before the count. All reads and mutations stay on the same
+	// caller-owned connection through Bun.
 	ctx := context.Background()
 	conn, err := db.Conn(ctx)
 	if err != nil {
@@ -564,7 +563,7 @@ func (db *DB) DeleteRepo(repoID int64, cascade bool) error {
 	defer conn.Close()
 
 	// BEGIN IMMEDIATE acquires a write lock immediately, preventing races
-	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+	if _, err := db.bun.NewRaw("BEGIN IMMEDIATE").Conn(conn).Exec(ctx); err != nil {
 		return err
 	}
 
@@ -572,15 +571,14 @@ func (db *DB) DeleteRepo(repoID int64, cascade bool) error {
 	committed := false
 	defer func() {
 		if !committed {
-			if _, err := conn.ExecContext(ctx, "ROLLBACK"); err != nil {
+			if _, err := db.bun.NewRaw("ROLLBACK").Conn(conn).Exec(ctx); err != nil {
 				log.Printf("repos DeleteRepo: rollback failed: %v", err)
 			}
 		}
 	}()
 
 	// Check for existing jobs (within transaction for consistency)
-	var jobCount int
-	err = conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM review_jobs WHERE repo_id = ?`, repoID).Scan(&jobCount)
+	jobCount, err := db.bun.NewSelect().Conn(conn).Table("review_jobs").Where("repo_id = ?", repoID).Count(ctx)
 	if err != nil {
 		return err
 	}
@@ -592,50 +590,41 @@ func (db *DB) DeleteRepo(repoID int64, cascade bool) error {
 	if cascade {
 		// Delete in correct order due to foreign keys
 		// 1a. Delete responses for jobs in this repo (job_id based)
-		_, err := conn.ExecContext(ctx, `
-			DELETE FROM responses WHERE job_id IN (
-				SELECT id FROM review_jobs WHERE repo_id = ?
-			)
-		`, repoID)
+		_, err := db.bun.NewDelete().Conn(conn).Table("responses").
+			Where("job_id IN (SELECT id FROM review_jobs WHERE repo_id = ?)", repoID).Exec(ctx)
 		if err != nil {
 			return err
 		}
 
 		// 1b. Delete responses for commits in this repo (legacy commit_id based)
-		_, err = conn.ExecContext(ctx, `
-			DELETE FROM responses WHERE commit_id IN (
-				SELECT id FROM commits WHERE repo_id = ?
-			)
-		`, repoID)
+		_, err = db.bun.NewDelete().Conn(conn).Table("responses").
+			Where("commit_id IN (SELECT id FROM commits WHERE repo_id = ?)", repoID).Exec(ctx)
 		if err != nil {
 			return err
 		}
 
 		// 2. Delete reviews for jobs in this repo
-		_, err = conn.ExecContext(ctx, `
-			DELETE FROM reviews WHERE job_id IN (
-				SELECT id FROM review_jobs WHERE repo_id = ?
-			)
-		`, repoID)
+		_, err = db.bun.NewDelete().Conn(conn).Table("reviews").
+			Where("job_id IN (SELECT id FROM review_jobs WHERE repo_id = ?)", repoID).Exec(ctx)
 		if err != nil {
 			return err
 		}
 
 		// 3. Delete jobs for this repo
-		_, err = conn.ExecContext(ctx, `DELETE FROM review_jobs WHERE repo_id = ?`, repoID)
+		_, err = db.bun.NewDelete().Conn(conn).Table("review_jobs").Where("repo_id = ?", repoID).Exec(ctx)
 		if err != nil {
 			return err
 		}
 
 		// 4. Delete commits for this repo
-		_, err = conn.ExecContext(ctx, `DELETE FROM commits WHERE repo_id = ?`, repoID)
+		_, err = db.bun.NewDelete().Conn(conn).Table("commits").Where("repo_id = ?", repoID).Exec(ctx)
 		if err != nil {
 			return err
 		}
 	}
 
 	// Delete the repo itself
-	result, err := conn.ExecContext(ctx, `DELETE FROM repos WHERE id = ?`, repoID)
+	result, err := db.bun.NewDelete().Conn(conn).Table("repos").Where("id = ?", repoID).Exec(ctx)
 	if err != nil {
 		return err
 	}
@@ -644,7 +633,7 @@ func (db *DB) DeleteRepo(repoID int64, cascade bool) error {
 		return sql.ErrNoRows
 	}
 
-	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
+	if _, err := db.bun.NewRaw("COMMIT").Conn(conn).Exec(ctx); err != nil {
 		return err
 	}
 	committed = true
@@ -657,8 +646,8 @@ func (db *DB) MergeRepos(sourceRepoID, targetRepoID int64) (int64, error) {
 		return 0, nil
 	}
 
-	// Raw SQL retained: SQLite BEGIN IMMEDIATE keeps repo, commit, and job
-	// reassignment atomic on one dedicated database/sql connection.
+	// SQLite transaction control remains raw so BEGIN IMMEDIATE keeps repo,
+	// commit, and job reassignment atomic on one Bun-managed connection.
 	ctx := context.Background()
 	conn, err := db.Conn(ctx)
 	if err != nil {
@@ -666,14 +655,14 @@ func (db *DB) MergeRepos(sourceRepoID, targetRepoID int64) (int64, error) {
 	}
 	defer conn.Close()
 
-	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+	if _, err := db.bun.NewRaw("BEGIN IMMEDIATE").Conn(conn).Exec(ctx); err != nil {
 		return 0, err
 	}
 
 	committed := false
 	defer func() {
 		if !committed {
-			if _, err := conn.ExecContext(ctx, "ROLLBACK"); err != nil {
+			if _, err := db.bun.NewRaw("ROLLBACK").Conn(conn).Exec(ctx); err != nil {
 				log.Printf("repos MergeRepos: rollback failed: %v", err)
 			}
 		}
@@ -683,25 +672,27 @@ func (db *DB) MergeRepos(sourceRepoID, targetRepoID int64) (int64, error) {
 	// Note: commits.sha is UNIQUE, so this will fail if both repos have
 	// commits with the same SHA (which shouldn't happen for the same git repo)
 	// Commit-based responses (legacy) are tied to commit_id which remains valid
-	_, err = conn.ExecContext(ctx, `UPDATE commits SET repo_id = ? WHERE repo_id = ?`, targetRepoID, sourceRepoID)
+	_, err = db.bun.NewUpdate().Conn(conn).Table("commits").Set("repo_id = ?", targetRepoID).
+		Where("repo_id = ?", sourceRepoID).Exec(ctx)
 	if err != nil {
 		return 0, err
 	}
 
 	// Move all jobs from source to target
-	result, err := conn.ExecContext(ctx, `UPDATE review_jobs SET repo_id = ? WHERE repo_id = ?`, targetRepoID, sourceRepoID)
+	result, err := db.bun.NewUpdate().Conn(conn).Table("review_jobs").Set("repo_id = ?", targetRepoID).
+		Where("repo_id = ?", sourceRepoID).Exec(ctx)
 	if err != nil {
 		return 0, err
 	}
 	affected, _ := result.RowsAffected()
 
 	// Delete the source repo (now empty)
-	_, err = conn.ExecContext(ctx, `DELETE FROM repos WHERE id = ?`, sourceRepoID)
+	_, err = db.bun.NewDelete().Conn(conn).Table("repos").Where("id = ?", sourceRepoID).Exec(ctx)
 	if err != nil {
 		return 0, err
 	}
 
-	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
+	if _, err := db.bun.NewRaw("COMMIT").Conn(conn).Exec(ctx); err != nil {
 		return 0, err
 	}
 	committed = true

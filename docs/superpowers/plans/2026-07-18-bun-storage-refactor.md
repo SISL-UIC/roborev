@@ -617,14 +617,14 @@ git commit -m "Route export queries through Bun"
 - Preserves all public `PgPool` and sync-worker method signatures.
 - Preserves pgx batches when needed for per-item results.
 
-- [ ] **Step 1: Read the mandatory migration discipline if a schema change is
+- [x] **Step 1: Read the mandatory migration discipline if a schema change is
   discovered**
 
 No schema change is planned. If model conversion exposes a required schema
 change, stop this task before editing `db.go`, `postgres.go` migration steps, or
 `schemas/postgres_v*.sql`, then invoke the database migration discipline.
 
-- [ ] **Step 2: Run PostgreSQL characterization tests**
+- [x] **Step 2: Run PostgreSQL characterization tests**
 
 With the repository's PostgreSQL test DSN configured, run:
 
@@ -635,38 +635,38 @@ go test -tags=postgres ./internal/storage -run \
 
 Expected: PASS before editing.
 
-- [ ] **Step 3: Convert schema metadata and simple PostgreSQL operations**
+- [x] **Step 3: Convert schema metadata and simple PostgreSQL operations**
 
 Use Bun for database ID, machine registration, repo/commit upserts, and ordinary
 schema-version reads. Keep schema statement execution and migration DDL raw.
 
-- [ ] **Step 4: Convert sync upserts**
+- [x] **Step 4: Convert sync upserts**
 
 Use canonical rows plus explicit PostgreSQL columns. Express the existing
 field-by-field `ON CONFLICT` policies with Bun's `On` and `Set` APIs when clear;
 otherwise retain the statement as a commented allowlisted Bun raw query.
 
-- [ ] **Step 5: Commit PostgreSQL schema and push conversion**
+- [x] **Step 5: Commit PostgreSQL schema and push conversion**
 
 ```bash
 git add internal/storage/postgres.go internal/storage/*postgres*_test.go
 git commit -m "Move PostgreSQL sync writes to Bun"
 ```
 
-- [ ] **Step 6: Convert pull queries**
+- [x] **Step 6: Convert pull queries**
 
 Build Bun selects for jobs, reviews, and responses with the exact existing
 keyset predicates and ordering. Scan directly into projection rows, then map to
 `PulledJob`, `PulledReview`, and `PulledResponse`. Preserve known-job filtering
 for reviews and timestamp/ID cursors.
 
-- [ ] **Step 7: Convert SQLite sync extraction and merges**
+- [x] **Step 7: Convert SQLite sync extraction and merges**
 
 Use Bun selects for local push candidates and Bun transactions for pulled-row
 merges. Preserve local-only fields, placeholder repo behavior, stale-update
 guards, and synced-at updates.
 
-- [ ] **Step 8: Retain or simplify pgx batches**
+- [x] **Step 8: Retain or simplify pgx batches**
 
 Keep `pgx.Batch` for review, response, or job operations where per-item results
 and fallback behavior are clearer than a Bun bulk insert. Route all non-batch
@@ -675,7 +675,7 @@ created from that same pool. If a retained batch reuses a Bun-built statement,
 render it through the error-returning `AppendQuery` API; never use `String()`,
 which panics on query-construction errors.
 
-- [ ] **Step 9: Commit pull and local-merge conversion**
+- [x] **Step 9: Commit pull and local-merge conversion**
 
 ```bash
 git add internal/storage/postgres.go internal/storage/sync.go \
@@ -684,7 +684,7 @@ git add internal/storage/postgres.go internal/storage/sync.go \
 git commit -m "Move sync pulls and local merges to Bun"
 ```
 
-- [ ] **Step 10: Run untagged and PostgreSQL tests**
+- [x] **Step 10: Run untagged and PostgreSQL tests**
 
 ```bash
 go test ./internal/storage -count=1
@@ -693,7 +693,7 @@ go test -tags=postgres ./internal/storage -count=1
 
 Expected: PASS.
 
-- [ ] **Step 11: Commit remaining PostgreSQL cleanup**
+- [x] **Step 11: Commit remaining PostgreSQL cleanup**
 
 ```bash
 git add internal/storage/postgres.go internal/storage/sync.go \
@@ -716,7 +716,7 @@ git commit -m "Unify PostgreSQL sync access with Bun"
 - Preserves all user-facing configuration and CLI behavior.
 - Produces a documented, reviewed raw-SQL allowlist in code comments.
 
-- [ ] **Step 1: Audit production raw database access**
+- [x] **Step 1: Audit production raw database access**
 
 Run:
 
@@ -728,19 +728,19 @@ rg -n '\.(Exec|Query|QueryRow|Prepare|Begin)(Context|Tx)?\(|NewRaw\(|SendBatch\(
 For every result, either convert it to a Bun query or confirm it belongs to the
 design's raw-SQL allowlist and add a short reason comment when not obvious.
 
-- [ ] **Step 2: Remove superseded helpers and imports**
+- [x] **Step 2: Remove superseded helpers and imports**
 
 Delete manual row scanners, placeholder builders, and duplicated nullable/time
 conversion code only when no callers remain. Keep `parseSQLiteTime` if legacy
 timestamp formats still require it.
 
-- [ ] **Step 3: Update documentation**
+- [x] **Step 3: Update documentation**
 
 In `docs/development.md`, describe Bun as the storage access layer over modernc
 SQLite and pgx PostgreSQL. In `docs/advanced/postgres-sync.md`, state that Bun
 and direct pgx batches share one pgx pool and that SQLite remains primary.
 
-- [ ] **Step 4: Format and run focused checks**
+- [x] **Step 4: Format and run focused checks**
 
 ```bash
 gofmt -w internal/storage internal/daemon cmd/roborev
@@ -750,7 +750,7 @@ go test ./internal/storage ./internal/daemon ./cmd/roborev -count=1
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit cleanup and documentation**
+- [x] **Step 5: Commit cleanup and documentation**
 
 ```bash
 git add internal/storage internal/daemon cmd/roborev docs/development.md \

@@ -1432,7 +1432,8 @@ func (db *DB) RemapJob(
 	repoID int64, oldSHA, newSHA, patchID string,
 	author, subject string, timestamp time.Time,
 ) (int, error) {
-	tx, err := db.Begin()
+	ctx := context.Background()
+	tx, err := db.bun.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, fmt.Errorf("begin remap tx: %w", err)
 	}
@@ -1447,7 +1448,7 @@ func (db *DB) RemapJob(
 		Where("repo_id = ?", repoID).
 		Where("status != ?", JobStatusRunning).
 		Where("patch_id IS NULL OR patch_id = '' OR patch_id = ?", patchID).
-		Scan(context.Background(), &matchCount)
+		Scan(ctx, &matchCount)
 	if err != nil {
 		return 0, fmt.Errorf("count matching jobs: %w", err)
 	}
@@ -1463,7 +1464,7 @@ func (db *DB) RemapJob(
 		Column("id").
 		Where("repo_id = ?", repoID).
 		Where("sha = ?", newSHA).
-		Scan(context.Background(), &commitID)
+		Scan(ctx, &commitID)
 	if errors.Is(err, sql.ErrNoRows) {
 		row := commitRow{
 			RepoID:    repoID,
@@ -1472,15 +1473,16 @@ func (db *DB) RemapJob(
 			Subject:   subject,
 			Timestamp: dbTimeFromValue(timestamp),
 		}
-		result, insertErr := db.bun.NewInsert().
+		insertErr := db.bun.NewInsert().
 			Model(&row).
 			Conn(tx).
 			Column("repo_id", "sha", "author", "subject", "timestamp").
-			Exec(context.Background())
+			Returning("id").
+			Scan(ctx)
 		if insertErr != nil {
 			return 0, fmt.Errorf("create commit: %w", insertErr)
 		}
-		commitID, _ = result.LastInsertId()
+		commitID = row.ID
 	} else if err != nil {
 		return 0, fmt.Errorf("find commit: %w", err)
 	}
@@ -1497,7 +1499,7 @@ func (db *DB) RemapJob(
 		Where("repo_id = ?", repoID).
 		Where("status != ?", JobStatusRunning).
 		Where("patch_id IS NULL OR patch_id = '' OR patch_id = ?", patchID).
-		Exec(context.Background())
+		Exec(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("remap job git_ref: %w", err)
 	}

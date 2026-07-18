@@ -17,7 +17,7 @@ import (
 // GetReviewByJobID finds a review by its job ID
 func (db *DB) GetReviewByJobID(jobID int64) (*Review, error) {
 	ctx := context.Background()
-	tx, err := db.BeginTx(ctx, nil)
+	tx, err := db.bun.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
