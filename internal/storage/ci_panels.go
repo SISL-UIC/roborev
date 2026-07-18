@@ -64,8 +64,8 @@ const ciPanelColumns = `id, github_repo, pr_number, head_sha, panel_run_uuid,
 
 // scanCIPanel hydrates a CIPanel from a row selecting ciPanelColumns. Nullable
 // columns are scanned through sql.Null* and the timestamps parsed with
-// parseSQLiteTime, mirroring how review_jobs nullable timestamps are hydrated
-// in applyReviewJobScan.
+// parseSQLiteTime, preserving the legacy CI scanner contract until CI rows
+// move to their canonical Bun model.
 func scanCIPanel(row sqlScanner) (*CIPanel, error) {
 	var p CIPanel
 	var synthesisJobID sql.NullInt64

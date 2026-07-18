@@ -398,7 +398,7 @@ git commit -m "Move core storage queries to Bun"
   `ListJobs`, and `WithoutPrompt()` projection behavior.
 - Preserves all exported storage method signatures.
 
-- [ ] **Step 1: Run characterization tests**
+- [x] **Step 1: Run characterization tests**
 
 ```bash
 go test ./internal/storage -run \
@@ -407,13 +407,13 @@ go test ./internal/storage -run \
 
 Expected: PASS before editing.
 
-- [ ] **Step 2: Convert job inserts and simple lookups**
+- [x] **Step 2: Convert job inserts and simple lookups**
 
 Use `jobRowFromModel`, explicit SQLite column lists, and `Returning("id")` where
 supported. Preserve UUID generation, machine ID assignment, dirty-file JSON,
 and time parsing. Use explicit select projections rather than `SELECT *`.
 
-- [ ] **Step 3: Convert `ListJobs` filter construction**
+- [x] **Step 3: Convert `ListJobs` filter construction**
 
 Build one `*bun.SelectQuery` from the existing `ListJobsOption`,
 `listJobsOptions`, `buildJobFilterClause`, and `ListJobs` behavior. Preserve
@@ -422,7 +422,7 @@ type, job type, minimum ID, panel run/role, classify-job exclusion, ordering,
 cursor, and limit semantics. Implement `WithoutPrompt()` by selecting the same
 explicit column list minus `prompt`; never hydrate then discard it.
 
-- [ ] **Step 4: Commit job creation and query conversion**
+- [x] **Step 4: Commit job creation and query conversion**
 
 ```bash
 git add internal/storage/jobs.go internal/storage/bun_models_jobs.go \
@@ -430,32 +430,32 @@ git add internal/storage/jobs.go internal/storage/bun_models_jobs.go \
 git commit -m "Move job creation and queries to Bun"
 ```
 
-- [ ] **Step 5: Convert guarded job transitions**
+- [x] **Step 5: Convert guarded job transitions**
 
 Use Bun updates for ordinary transitions. Keep raw Bun queries for atomic claims
 and compare-and-set updates where affected-row counts are part of correctness.
 Add an allowlist comment above each retained raw statement.
 
-- [ ] **Step 6: Commit job transition conversion**
+- [x] **Step 6: Commit job transition conversion**
 
 ```bash
 git add internal/storage/jobs.go internal/storage/db_job_test.go
 git commit -m "Move job transitions to Bun"
 ```
 
-- [ ] **Step 7: Convert review and response persistence**
+- [x] **Step 7: Convert review and response persistence**
 
 Use Bun inserts and selects with explicit columns. Preserve one-review-per-job,
 closed-state updates, append-only response semantics, sync timestamps, and
 review verdict backfills.
 
-- [ ] **Step 8: Convert hydration, verdict, and cost queries**
+- [x] **Step 8: Convert hydration, verdict, and cost queries**
 
 Keep aggregate work in SQL/Bun query builders; do not load rows and aggregate in
 Go. Preserve current `COALESCE`, timing, and agent-invocation eligibility
 semantics.
 
-- [ ] **Step 9: Run focused and package tests**
+- [x] **Step 9: Run focused and package tests**
 
 ```bash
 go test ./internal/storage -run \
@@ -465,7 +465,7 @@ go test ./internal/storage -count=1
 
 Expected: PASS.
 
-- [ ] **Step 10: Commit review and hydration conversion**
+- [x] **Step 10: Commit review and hydration conversion**
 
 ```bash
 git add internal/storage/jobs.go internal/storage/reviews.go \

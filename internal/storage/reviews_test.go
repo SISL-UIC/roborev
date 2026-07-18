@@ -399,8 +399,7 @@ func TestGetJobsWithReviewsByIDsPreservesBackup(t *testing.T) {
 
 // TestSingleReviewGettersPreserveBackupAndMinSeverity verifies that the
 // single-review getters carry backup_agent/backup_model/min_severity through
-// hydration. The columns are scanned into the scan-fields struct so
-// applyReviewJobScan does not clobber them back to zero.
+// canonical Bun hydration.
 func TestSingleReviewGettersPreserveBackupAndMinSeverity(t *testing.T) {
 	db := openTestDB(t)
 	defer db.Close()

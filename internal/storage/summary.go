@@ -185,7 +185,7 @@ func (db *DB) GetSummary(opts SummaryOptions) (*Summary, error) {
 	if opts.RepoPath != "" {
 		costRepos = []string{opts.RepoPath}
 	}
-	s.Cost, err = costAggregate(tx, CostOptions{
+	s.Cost, err = costAggregate(db.bun, tx, CostOptions{
 		RepoPaths: costRepos,
 		Branch:    opts.Branch,
 		Since:     opts.Since,

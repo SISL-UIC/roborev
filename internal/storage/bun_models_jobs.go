@@ -295,6 +295,80 @@ var sqliteJobClaimColumns = []string{
 	"c.subject AS commit_subject",
 }
 
+var sqliteReviewJobColumns = []string{
+	"j.id",
+	"j.repo_id",
+	"j.commit_id",
+	"j.git_ref",
+	"j.branch",
+	"j.ci_base_branch",
+	"j.session_id",
+	"j.agent",
+	"j.reasoning",
+	"j.status",
+	"j.enqueued_at",
+	"j.started_at",
+	"j.finished_at",
+	"j.worker_id",
+	"j.error",
+	"j.model",
+	"j.provider",
+	"j.requested_model",
+	"j.requested_provider",
+	"COALESCE(j.job_type, '') AS job_type",
+	"COALESCE(j.review_type, '') AS review_type",
+	"j.patch_id",
+	"j.token_usage",
+	"COALESCE(j.min_severity, '') AS min_severity",
+	"COALESCE(j.backup_agent, '') AS backup_agent",
+	"COALESCE(j.backup_model, '') AS backup_model",
+	"j.panel_run_uuid",
+	"j.panel_role",
+	"j.panel_name",
+	"j.panel_member_name",
+	"j.panel_member_index",
+	"j.panel_member_config_json",
+	"COALESCE(j.claim_blocked, 0) AS claim_blocked",
+	"rp.root_path AS repo_path",
+	"rp.name AS repo_name",
+	"c.subject AS commit_subject",
+}
+
+var sqliteBatchReviewJobColumns = []string{
+	"j.id",
+	"j.repo_id",
+	"j.commit_id",
+	"j.git_ref",
+	"j.branch",
+	"j.ci_base_branch",
+	"j.session_id",
+	"j.agent",
+	"j.reasoning",
+	"j.status",
+	"j.enqueued_at",
+	"j.started_at",
+	"j.finished_at",
+	"j.worker_id",
+	"j.error",
+	"COALESCE(j.agentic, 0) AS agentic",
+	"j.model",
+	"COALESCE(j.job_type, '') AS job_type",
+	"COALESCE(j.review_type, '') AS review_type",
+	"COALESCE(j.min_severity, '') AS min_severity",
+	"COALESCE(j.backup_agent, '') AS backup_agent",
+	"COALESCE(j.backup_model, '') AS backup_model",
+	"j.panel_run_uuid",
+	"j.panel_role",
+	"j.panel_name",
+	"j.panel_member_name",
+	"j.panel_member_index",
+	"j.panel_member_config_json",
+	"COALESCE(j.claim_blocked, 0) AS claim_blocked",
+	"r.root_path AS repo_path",
+	"r.name AS repo_name",
+	"c.subject AS commit_subject",
+}
+
 type jobRow struct {
 	bun.BaseModel `bun:"table:review_jobs,alias:j"`
 
@@ -511,7 +585,7 @@ func intValue(value *int) int {
 	return *value
 }
 
-type reviewRow struct { //nolint:unused // Consumed by the staged Bun query conversion.
+type reviewRow struct {
 	bun.BaseModel      `bun:"table:reviews,alias:rv"`
 	ID                 int64   `bun:"id,pk,autoincrement"`
 	JobID              *int64  `bun:"job_id"`
@@ -528,7 +602,30 @@ type reviewRow struct { //nolint:unused // Consumed by the staged Bun query conv
 	VerdictBool        *int    `bun:"verdict_bool"`
 }
 
-type responseRow struct { //nolint:unused // Consumed by the staged Bun query conversion.
+func (row reviewRow) toModel() Review {
+	review := Review{
+		ID:                 row.ID,
+		Agent:              row.Agent,
+		Prompt:             row.Prompt,
+		Output:             row.Output,
+		CreatedAt:          row.CreatedAt.Time,
+		Closed:             row.Closed,
+		UUID:               stringValue(row.UUID),
+		UpdatedAt:          row.UpdatedAt.pointer(),
+		UpdatedByMachineID: stringValue(row.UpdatedByMachineID),
+		SyncedAt:           row.SyncedAt.pointer(),
+	}
+	if row.JobID != nil {
+		review.JobID = *row.JobID
+	}
+	if row.VerdictBool != nil {
+		verdict := *row.VerdictBool
+		review.VerdictBool = &verdict
+	}
+	return review
+}
+
+type responseRow struct {
 	bun.BaseModel   `bun:"table:responses,alias:rs"`
 	ID              int64   `bun:"id,pk,autoincrement"`
 	CommitID        *int64  `bun:"commit_id"`
@@ -541,4 +638,18 @@ type responseRow struct { //nolint:unused // Consumed by the staged Bun query co
 	SourceMachineID *string `bun:"source_machine_id"`
 	SyncedAt        dbTime  `bun:"synced_at"`
 	InsertedAt      dbTime  `bun:"inserted_at"`
+}
+
+func (row responseRow) toModel() Response {
+	return Response{
+		ID:              row.ID,
+		CommitID:        cloneInt64Pointer(row.CommitID),
+		JobID:           cloneInt64Pointer(row.JobID),
+		Responder:       row.Responder,
+		Response:        row.Response,
+		CreatedAt:       row.CreatedAt.Time,
+		UUID:            stringValue(row.UUID),
+		SourceMachineID: stringValue(row.SourceMachineID),
+		SyncedAt:        row.SyncedAt.pointer(),
+	}
 }
