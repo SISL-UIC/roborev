@@ -41,6 +41,7 @@ func (t *dbTime) scanString(value string) error {
 	for _, layout := range []string{
 		time.RFC3339Nano,
 		time.RFC3339,
+		"2006-01-02 15:04:05.999999999Z07:00",
 		"2006-01-02 15:04:05",
 	} {
 		parsed, err := time.Parse(layout, value)
@@ -57,10 +58,59 @@ func (t dbTime) Value() (driver.Value, error) {
 	if !t.Valid {
 		return nil, nil
 	}
-	return t.Time, nil
+	return t.Time.Format(time.RFC3339Nano), nil
 }
 
-type repoRow struct { //nolint:unused // Consumed by the staged Bun query conversion.
+func dbTimeFromValue(value time.Time) dbTime {
+	return dbTime{Time: value, Valid: true}
+}
+
+func dbTimeFromPointer(value *time.Time) dbTime {
+	if value == nil {
+		return dbTime{}
+	}
+	return dbTime{Time: *value, Valid: true}
+}
+
+func (t dbTime) pointer() *time.Time {
+	if !t.Valid {
+		return nil
+	}
+	value := t.Time
+	return &value
+}
+
+func optionalString(value string) *string {
+	if value == "" {
+		return nil
+	}
+	return &value
+}
+
+func stringValue(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
+}
+
+func cloneStringPointer(value *string) *string {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
+}
+
+func cloneInt64Pointer(value *int64) *int64 {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
+}
+
+type repoRow struct {
 	bun.BaseModel `bun:"table:repos,alias:r"`
 	ID            int64   `bun:"id,pk,autoincrement"`
 	RootPath      string  `bun:"root_path"`
@@ -69,7 +119,17 @@ type repoRow struct { //nolint:unused // Consumed by the staged Bun query conver
 	CreatedAt     dbTime  `bun:"created_at"`
 }
 
-type commitRow struct { //nolint:unused // Consumed by the staged Bun query conversion.
+func (row repoRow) toModel() Repo {
+	return Repo{
+		ID:        row.ID,
+		RootPath:  row.RootPath,
+		Name:      row.Name,
+		CreatedAt: row.CreatedAt.Time,
+		Identity:  stringValue(row.Identity),
+	}
+}
+
+type commitRow struct {
 	bun.BaseModel `bun:"table:commits,alias:c"`
 	ID            int64  `bun:"id,pk,autoincrement"`
 	RepoID        int64  `bun:"repo_id"`
@@ -78,4 +138,16 @@ type commitRow struct { //nolint:unused // Consumed by the staged Bun query conv
 	Subject       string `bun:"subject"`
 	Timestamp     dbTime `bun:"timestamp"`
 	CreatedAt     dbTime `bun:"created_at"`
+}
+
+func (row commitRow) toModel() Commit {
+	return Commit{
+		ID:        row.ID,
+		RepoID:    row.RepoID,
+		SHA:       row.SHA,
+		Author:    row.Author,
+		Subject:   row.Subject,
+		Timestamp: row.Timestamp.Time,
+		CreatedAt: row.CreatedAt.Time,
+	}
 }

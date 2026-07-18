@@ -188,22 +188,3 @@ func applyReviewScan(review *Review, fields reviewScanFields) {
 	}
 	applyReviewVerdict(review, fields.VerdictBool)
 }
-
-func scanCommit(scanner sqlScanner) (*Commit, error) {
-	var commit Commit
-	var timestamp, createdAt string
-	if err := scanner.Scan(
-		&commit.ID,
-		&commit.RepoID,
-		&commit.SHA,
-		&commit.Author,
-		&commit.Subject,
-		&timestamp,
-		&createdAt,
-	); err != nil {
-		return nil, err
-	}
-	commit.Timestamp = parseSQLiteTime(timestamp)
-	commit.CreatedAt = parseSQLiteTime(createdAt)
-	return &commit, nil
-}

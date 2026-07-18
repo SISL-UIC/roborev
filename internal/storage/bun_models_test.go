@@ -26,13 +26,19 @@ func TestDBTimeScan(t *testing.T) {
 			want:      time.Date(2026, time.July, 18, 15, 4, 5, 0, time.UTC),
 			wantValid: true,
 		},
+		{
+			name:      "SQLite time value",
+			value:     "2026-07-18 15:04:05.123456789+00:00",
+			want:      want,
+			wantValid: true,
+		},
 		{name: "null", value: nil},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			var got dbTime
 			require.NoError(t, got.Scan(tt.value))
 			assert.Equal(t, tt.wantValid, got.Valid)
-			assert.Equal(t, tt.want, got.Time)
+			assert.True(t, got.Time.Equal(tt.want))
 		})
 	}
 }
@@ -42,11 +48,13 @@ func TestDBTimeValue(t *testing.T) {
 
 	value, err := (dbTime{Time: want, Valid: true}).Value()
 	require.NoError(t, err)
-	assert.Equal(t, want, value)
+	assert.Equal(t, want.Format(time.RFC3339Nano), value)
 
 	value, err = (dbTime{}).Value()
 	require.NoError(t, err)
 	assert.Nil(t, value)
+
+	assert.True(t, dbTimeFromValue(time.Time{}).Valid)
 }
 
 func TestReviewJobRowRoundTripPreservesPersistedFields(t *testing.T) {

@@ -49,14 +49,14 @@ type ciReviewAttemptRow struct { //nolint:unused // Consumed by the staged Bun q
 	UpdatedAt                  dbTime `bun:"updated_at"`
 }
 
-type daemonStateRow struct { //nolint:unused // Consumed by the staged Bun query conversion.
+type daemonStateRow struct {
 	bun.BaseModel `bun:"table:daemon_state,alias:ds"`
 	Key           string `bun:"key,pk"`
 	Value         string `bun:"value"`
 	UpdatedAt     dbTime `bun:"updated_at"`
 }
 
-type syncStateRow struct { //nolint:unused // Consumed by the staged Bun query conversion.
+type syncStateRow struct {
 	bun.BaseModel `bun:"table:sync_state,alias:ss"`
 	Key           string `bun:"key,pk"`
 	Value         string `bun:"value"`

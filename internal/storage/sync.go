@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -23,24 +24,24 @@ const (
 // GetSyncState retrieves a value from the sync_state table.
 // Returns empty string if key doesn't exist.
 func (db *DB) GetSyncState(key string) (string, error) {
-	var value string
-	err := db.QueryRow(`SELECT value FROM sync_state WHERE key = ?`, key).Scan(&value)
-	if err == sql.ErrNoRows {
+	var row syncStateRow
+	err := db.bun.NewSelect().
+		Model(&row).
+		Column("value").
+		Where("key = ?", key).
+		Scan(context.Background())
+	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}
 	if err != nil {
 		return "", fmt.Errorf("get sync state %s: %w", key, err)
 	}
-	return value, nil
+	return row.Value, nil
 }
 
 // SetSyncState sets a value in the sync_state table (upsert).
 func (db *DB) SetSyncState(key, value string) error {
-	_, err := db.Exec(`
-		INSERT INTO sync_state (key, value) VALUES (?, ?)
-		ON CONFLICT(key) DO UPDATE SET value = excluded.value
-	`, key, value)
-	if err != nil {
+	if err := upsertKeyValue(context.Background(), db.bun, syncStateTable, key, value); err != nil {
 		return fmt.Errorf("set sync state %s: %w", key, err)
 	}
 	return nil
@@ -74,14 +75,12 @@ func (db *DB) GetOrCreateSyncStateValue(key string, create func() (string, error
 		return "", errors.New("created sync state value is required")
 	}
 
-	if value == "" {
-		_, err = db.Exec(`
-			INSERT OR IGNORE INTO sync_state (key, value) VALUES (?, ?)
-		`, key, created)
-	} else {
-		_, err = db.Exec(`UPDATE sync_state SET value = ? WHERE key = ?`, created, key)
-	}
-	if err != nil {
+	row := syncStateRow{Key: key, Value: created}
+	if _, err = db.bun.NewInsert().
+		Model(&row).
+		Column("key", "value").
+		On("CONFLICT (key) DO NOTHING").
+		Exec(context.Background()); err != nil {
 		return "", fmt.Errorf("create sync state %s: %w", key, err)
 	}
 
@@ -99,34 +98,44 @@ func (db *DB) GetOrCreateSyncStateValue(key string, create func() (string, error
 }
 
 // GetMachineID returns this machine's unique identifier, creating one if it doesn't exist.
-// Uses INSERT OR IGNORE + SELECT to ensure concurrency-safe behavior.
+// Uses ON CONFLICT DO NOTHING + SELECT to ensure concurrency-safe behavior.
 // Treats empty values as missing and regenerates.
 func (db *DB) GetMachineID() (string, error) {
 	// Try to insert a new ID, ignoring if one already exists
 	newID := GenerateUUID()
-	_, err := db.Exec(`
-		INSERT OR IGNORE INTO sync_state (key, value) VALUES (?, ?)
-	`, SyncStateMachineID, newID)
+	row := syncStateRow{Key: SyncStateMachineID, Value: newID}
+	_, err := db.bun.NewInsert().
+		Model(&row).
+		Column("key", "value").
+		On("CONFLICT (key) DO NOTHING").
+		Exec(context.Background())
 	if err != nil {
 		return "", fmt.Errorf("insert machine ID: %w", err)
 	}
 
 	// Always select the stored value (either ours or a concurrent caller's)
-	var id string
-	err = db.QueryRow(`SELECT value FROM sync_state WHERE key = ?`, SyncStateMachineID).Scan(&id)
+	err = db.bun.NewSelect().
+		Model(&row).
+		Column("value").
+		Where("key = ?", SyncStateMachineID).
+		Scan(context.Background())
 	if err != nil {
 		return "", fmt.Errorf("get machine ID: %w", err)
 	}
 
 	// Treat empty value as missing (could happen from manual edits or past bugs)
-	if id == "" {
-		_, err = db.Exec(`UPDATE sync_state SET value = ? WHERE key = ?`, newID, SyncStateMachineID)
+	if row.Value == "" {
+		_, err = db.bun.NewUpdate().
+			Model((*syncStateRow)(nil)).
+			Set("value = ?", newID).
+			Where("key = ?", SyncStateMachineID).
+			Exec(context.Background())
 		if err != nil {
 			return "", fmt.Errorf("update empty machine ID: %w", err)
 		}
 		return newID, nil
 	}
-	return id, nil
+	return row.Value, nil
 }
 
 // GetDatabaseID returns this local database's unique identifier, creating one
@@ -193,40 +202,26 @@ func (db *DB) ClearAllSyncedAt() error {
 // Uses config.ResolveRepoIdentity to ensure consistency with new repo creation.
 // Returns the number of repos backfilled.
 func (db *DB) BackfillRepoIdentities() (int, error) {
-	// Get repos without identity
-	rows, err := db.Query(`SELECT id, root_path FROM repos WHERE identity IS NULL OR identity = ''`)
-	if err != nil {
+	var rows []repoRow
+	if err := db.bun.NewSelect().
+		Model(&rows).
+		Column("id", "root_path").
+		Where("identity IS NULL OR identity = ''").
+		Scan(context.Background()); err != nil {
 		return 0, fmt.Errorf("query repos without identity: %w", err)
-	}
-	defer rows.Close()
-
-	type repoInfo struct {
-		id   int64
-		path string
-	}
-	var repos []repoInfo
-	for rows.Next() {
-		var r repoInfo
-		if err := rows.Scan(&r.id, &r.path); err != nil {
-			return 0, fmt.Errorf("scan repo: %w", err)
-		}
-		repos = append(repos, r)
-	}
-	if err := rows.Err(); err != nil {
-		return 0, err
 	}
 
 	backfilled := 0
-	for _, r := range repos {
+	for _, row := range rows {
 		// Use the same resolver as new repo creation to ensure consistency
-		identity := config.ResolveRepoIdentity(r.path, nil)
+		identity := config.ResolveRepoIdentity(row.RootPath, nil)
 		if identity == "" {
 			// Shouldn't happen since ResolveRepoIdentity always returns something,
 			// but skip if it does
 			continue
 		}
 
-		if err := db.SetRepoIdentity(r.id, identity); err != nil {
+		if err := db.SetRepoIdentity(row.ID, identity); err != nil {
 			// May fail due to duplicate identity - skip
 			continue
 		}
@@ -238,7 +233,11 @@ func (db *DB) BackfillRepoIdentities() (int, error) {
 
 // SetRepoIdentity sets the identity for a repo.
 func (db *DB) SetRepoIdentity(repoID int64, identity string) error {
-	_, err := db.Exec(`UPDATE repos SET identity = ? WHERE id = ?`, identity, repoID)
+	_, err := db.bun.NewUpdate().
+		Model((*repoRow)(nil)).
+		Set("identity = ?", identity).
+		Where("id = ?", repoID).
+		Exec(context.Background())
 	if err != nil {
 		return fmt.Errorf("set repo identity: %w", err)
 	}
@@ -248,39 +247,22 @@ func (db *DB) SetRepoIdentity(repoID int64, identity string) error {
 // GetRepoByIdentity finds a repo by its identity.
 // Returns nil if not found, error if duplicates exist.
 func (db *DB) GetRepoByIdentity(identity string) (*Repo, error) {
-	rows, err := db.Query(`
-		SELECT id, root_path, name, created_at, identity
-		FROM repos WHERE identity = ?
-	`, identity)
-	if err != nil {
+	var rows []repoRow
+	if err := db.bun.NewSelect().
+		Model(&rows).
+		Column(repoColumns...).
+		Where("identity = ?", identity).
+		Scan(context.Background()); err != nil {
 		return nil, fmt.Errorf("query repo by identity: %w", err)
 	}
-	defer rows.Close()
-
-	var r Repo
-	var count int
-	for rows.Next() {
-		count++
-		if count > 1 {
-			return nil, fmt.Errorf("multiple repos found with identity %q", identity)
-		}
-		var createdAt string
-		var identityVal sql.NullString
-		if err := rows.Scan(&r.ID, &r.RootPath, &r.Name, &createdAt, &identityVal); err != nil {
-			return nil, fmt.Errorf("scan repo: %w", err)
-		}
-		r.CreatedAt = parseSQLiteTime(createdAt)
-		if identityVal.Valid {
-			r.Identity = identityVal.String
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("get repo by identity: %w", err)
-	}
-	if count == 0 {
+	if len(rows) == 0 {
 		return nil, nil
 	}
-	return &r, nil
+	if len(rows) > 1 {
+		return nil, fmt.Errorf("multiple repos found with identity %q", identity)
+	}
+	repo := rows[0].toModel()
+	return &repo, nil
 }
 
 // GetRepoByIdentityCaseInsensitive is like GetRepoByIdentity but uses
@@ -289,31 +271,19 @@ func (db *DB) GetRepoByIdentity(identity string) (*Repo, error) {
 // Excludes sync placeholders (root_path == identity) which don't have
 // a real local checkout.
 func (db *DB) GetRepoByIdentityCaseInsensitive(identity string) (*Repo, error) {
-	rows, err := db.Query(`
-		SELECT id, root_path, name, created_at, identity
-		FROM repos WHERE LOWER(identity) = LOWER(?) AND root_path != identity
-	`, identity)
-	if err != nil {
+	var rows []repoRow
+	if err := db.bun.NewSelect().
+		Model(&rows).
+		Column(repoColumns...).
+		Where("LOWER(identity) = LOWER(?)", identity).
+		Where("root_path != identity").
+		Scan(context.Background()); err != nil {
 		return nil, fmt.Errorf("query repo by identity (ci): %w", err)
 	}
-	defer rows.Close()
 
-	var matches []Repo
-	for rows.Next() {
-		var r Repo
-		var createdAt string
-		var identityVal sql.NullString
-		if err := rows.Scan(&r.ID, &r.RootPath, &r.Name, &createdAt, &identityVal); err != nil {
-			return nil, fmt.Errorf("scan repo: %w", err)
-		}
-		r.CreatedAt = parseSQLiteTime(createdAt)
-		if identityVal.Valid {
-			r.Identity = identityVal.String
-		}
-		matches = append(matches, r)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("get repo by identity (ci): %w", err)
+	matches := make([]Repo, 0, len(rows))
+	for _, row := range rows {
+		matches = append(matches, row.toModel())
 	}
 	if len(matches) == 0 {
 		return nil, nil
@@ -929,22 +899,15 @@ func (db *DB) GetKnownJobUUIDs() ([]string, error) {
 func (db *DB) GetOrCreateRepoByIdentity(identity string) (int64, error) {
 	// First, check for local repos with this identity
 	// (excluding placeholders where root_path == identity)
-	rows, err := db.Query(`SELECT id FROM repos WHERE identity = ? AND root_path != ?`, identity, identity)
-	if err != nil {
-		return 0, fmt.Errorf("find repos by identity: %w", err)
-	}
-	defer rows.Close()
-
+	ctx := context.Background()
 	var repoIDs []int64
-	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err != nil {
-			return 0, fmt.Errorf("scan repo id: %w", err)
-		}
-		repoIDs = append(repoIDs, id)
-	}
-	if err := rows.Err(); err != nil {
-		return 0, fmt.Errorf("iterate repos: %w", err)
+	if err := db.bun.NewSelect().
+		Table("repos").
+		Column("id").
+		Where("identity = ?", identity).
+		Where("root_path != ?", identity).
+		Scan(ctx, &repoIDs); err != nil {
+		return 0, fmt.Errorf("find repos by identity: %w", err)
 	}
 
 	// If exactly one local repo exists, always use it (even if placeholder exists)
@@ -954,7 +917,12 @@ func (db *DB) GetOrCreateRepoByIdentity(identity string) (int64, error) {
 
 	// 0 or 2+ local repos - look for existing placeholder
 	var placeholderID int64
-	err = db.QueryRow(`SELECT id FROM repos WHERE root_path = ? AND identity = ?`, identity, identity).Scan(&placeholderID)
+	err := db.bun.NewSelect().
+		Table("repos").
+		Column("id").
+		Where("root_path = ?", identity).
+		Where("identity = ?", identity).
+		Scan(ctx, &placeholderID)
 	if err == nil {
 		return placeholderID, nil
 	}
@@ -964,15 +932,27 @@ func (db *DB) GetOrCreateRepoByIdentity(identity string) (int64, error) {
 
 	// No placeholder exists - create one
 	// Use extracted repo name for display, but root_path stays as identity to mark it as a placeholder
-	displayName := ExtractRepoNameFromIdentity(identity)
-	result, err := db.Exec(`
-		INSERT INTO repos (root_path, name, identity)
-		VALUES (?, ?, ?)
-	`, identity, displayName, identity)
-	if err != nil {
+	row := repoRow{
+		RootPath: identity,
+		Name:     ExtractRepoNameFromIdentity(identity),
+		Identity: optionalString(identity),
+	}
+	if _, err := db.bun.NewInsert().
+		Model(&row).
+		Column("root_path", "name", "identity").
+		On("CONFLICT (root_path) DO NOTHING").
+		Exec(ctx); err != nil {
 		return 0, fmt.Errorf("create placeholder repo: %w", err)
 	}
-	return result.LastInsertId()
+	if err := db.bun.NewSelect().
+		Table("repos").
+		Column("id").
+		Where("root_path = ?", identity).
+		Where("identity = ?", identity).
+		Scan(ctx, &placeholderID); err != nil {
+		return 0, fmt.Errorf("read placeholder repo: %w", err)
+	}
+	return placeholderID, nil
 }
 
 // ExtractRepoNameFromIdentity extracts a human-readable name from a git identity.
@@ -1013,25 +993,11 @@ func ExtractRepoNameFromIdentity(identity string) string {
 
 // GetOrCreateCommitByRepoAndSHA finds or creates a commit.
 func (db *DB) GetOrCreateCommitByRepoAndSHA(repoID int64, sha, author, subject string, timestamp time.Time) (int64, error) {
-	// Try to find existing
-	var id int64
-	err := db.QueryRow(`SELECT id FROM commits WHERE repo_id = ? AND sha = ?`, repoID, sha).Scan(&id)
-	if err == nil {
-		return id, nil
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return 0, fmt.Errorf("find commit: %w", err)
-	}
-
-	// Create
-	result, err := db.Exec(`
-		INSERT INTO commits (repo_id, sha, author, subject, timestamp)
-		VALUES (?, ?, ?, ?, ?)
-	`, repoID, sha, author, subject, timestamp.Format(time.RFC3339))
+	commit, err := db.GetOrCreateCommit(repoID, sha, author, subject, timestamp)
 	if err != nil {
 		return 0, fmt.Errorf("create commit: %w", err)
 	}
-	return result.LastInsertId()
+	return commit.ID, nil
 }
 
 // nullStr returns nil if s is empty, otherwise returns s

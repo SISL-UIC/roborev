@@ -1,10 +1,6 @@
 package storage
 
-import (
-	"time"
-
-	"github.com/uptrace/bun"
-)
+import "github.com/uptrace/bun"
 
 var sqliteJobColumns = []string{
 	"id",
@@ -275,36 +271,6 @@ func (row jobRow) applyToModel(job *ReviewJob) {
 	job.SyncedAt = row.SyncedAt.pointer()
 }
 
-func optionalString(value string) *string {
-	if value == "" {
-		return nil
-	}
-	return &value
-}
-
-func stringValue(value *string) string {
-	if value == nil {
-		return ""
-	}
-	return *value
-}
-
-func cloneStringPointer(value *string) *string {
-	if value == nil {
-		return nil
-	}
-	cloned := *value
-	return &cloned
-}
-
-func cloneInt64Pointer(value *int64) *int64 {
-	if value == nil {
-		return nil
-	}
-	cloned := *value
-	return &cloned
-}
-
 func optionalInt(value int) *int {
 	if value == 0 {
 		return nil
@@ -317,25 +283,6 @@ func intValue(value *int) int {
 		return 0
 	}
 	return *value
-}
-
-func dbTimeFromValue(value time.Time) dbTime {
-	return dbTime{Time: value, Valid: !value.IsZero()}
-}
-
-func dbTimeFromPointer(value *time.Time) dbTime {
-	if value == nil {
-		return dbTime{}
-	}
-	return dbTime{Time: *value, Valid: true}
-}
-
-func (t dbTime) pointer() *time.Time {
-	if !t.Valid {
-		return nil
-	}
-	value := t.Time
-	return &value
 }
 
 type reviewRow struct { //nolint:unused // Consumed by the staged Bun query conversion.
