@@ -85,6 +85,13 @@ refactor because production code and a large body of tests use it directly. New
 production storage behavior should be added as a `storage.DB` method rather than
 as SQL outside the storage package.
 
+Production SQL outside `internal/storage` is part of the conversion scope. The
+implementation must inventory direct `Exec`, `Query`, `QueryRow`, `Prepare`, and
+transaction calls, including context-suffixed forms, in `internal/daemon` and
+`cmd/roborev`. Non-allowlisted queries move behind Bun-backed `storage.DB`
+methods. Direct access remains only for tests and documented native operations
+such as the SQLite WAL checkpoint pragma.
+
 ### PostgreSQL handle
 
 `PgPool` remains the synchronization-facing wrapper used by the sync worker and
@@ -117,6 +124,12 @@ responsibility:
 Small mapping functions convert between public models, Bun rows, and sync DTOs.
 These functions own nullable-value handling, JSON encoding, timestamp
 normalization, and boolean representation.
+
+Persisted timestamps use a private scanner/value type rather than plain
+`time.Time` fields. The scanner accepts native PostgreSQL `time.Time` values,
+RFC3339 strings and bytes, and the historical bare SQLite datetime format. It
+normalizes each valid value to `time.Time` without forcing PostgreSQL through a
+string-only projection. Nullable timestamps carry an explicit validity bit.
 
 ### Dialect policy
 

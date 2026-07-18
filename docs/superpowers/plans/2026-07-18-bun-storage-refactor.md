@@ -38,6 +38,15 @@ dialects, modernc SQLite, pgx v5/pgxpool, testify.
 - Do not add tests for Bun library behavior or generated SQL strings.
 - Do not modify database schemas unless a concrete blocker is found; if one is
   found, stop and apply the database migration discipline before editing it.
+- Add parity coverage for nulls, booleans, timestamps, conflict policies, and
+  cursor boundaries at roborev-owned SQLite/PostgreSQL seams.
+- Preserve existing atomic-claim and compare-and-set concurrency tests; add a
+  regression only when a conversion changes that owned state transition.
+- Metadata-only listings must continue excluding prompt columns at query time,
+  aggregate paths must not introduce N+1 queries, and sync batches must retain
+  their current bounded sizes and per-item result behavior.
+- Every intermediate commit is behavior-preserving and independently
+  revertible; do not add a runtime dual-read or dual-write fallback.
 
 ---
 
@@ -159,7 +168,14 @@ go test ./internal/storage -count=1
 
 Expected: PASS.
 
-- [ ] **Step 7: Commit the plumbing**
+- [ ] **Step 7: Add PostgreSQL shared-pool coverage**
+
+Add a PostgreSQL-tagged test that writes an unqualified `sync_metadata` row
+through `PgPool.Pool()`, reads it through `PgPool.bun`, closes the Bun/SQL
+wrapper, and confirms the underlying pgx pool still responds to `Ping`. This
+tests roborev's search-path and ownership seam, not pgx or Bun in isolation.
+
+- [ ] **Step 8: Commit the plumbing**
 
 ```bash
 git add go.mod go.sum internal/storage/db.go internal/storage/postgres.go \
@@ -221,7 +237,7 @@ type repoRow struct {
 	RootPath      string    `bun:"root_path"`
 	Name          string    `bun:"name"`
 	Identity      *string   `bun:"identity"`
-	CreatedAt     time.Time `bun:"created_at"`
+	CreatedAt     dbTime    `bun:"created_at"`
 }
 
 type commitRow struct {
@@ -231,13 +247,16 @@ type commitRow struct {
 	SHA           string    `bun:"sha"`
 	Author        string    `bun:"author"`
 	Subject       string    `bun:"subject"`
-	Timestamp     time.Time `bun:"timestamp"`
-	CreatedAt     time.Time `bun:"created_at"`
+	Timestamp     dbTime    `bun:"timestamp"`
+	CreatedAt     dbTime    `bun:"created_at"`
 }
 ```
 
-Use pointer fields for nullable persisted values and retain raw string timestamp
-fields only where SQLite's historical timestamp formats require custom parsing.
+Define `dbTime` with `Scan(any) error` and `Value() (driver.Value, error)`.
+`Scan` must accept native `time.Time`, RFC3339 `string`/`[]byte`, bare SQLite
+`2006-01-02 15:04:05`, and `nil`. Use its validity bit for nullable timestamps.
+This keeps one row model without losing SQLite legacy parsing or converting
+native PostgreSQL timestamps through string projections.
 
 - [ ] **Step 4: Implement job/review/response rows and mappings**
 
@@ -361,7 +380,8 @@ git commit -m "Move core storage queries to Bun"
 **Interfaces:**
 
 - Consumes: `jobRow`, `reviewRow`, `responseRow` and mapping helpers.
-- Preserves: `JobQuery` filtering and `WithoutPrompt()` projection behavior.
+- Preserves: `ListJobsOption`, `listJobsOptions`, `buildJobFilterClause`,
+  `ListJobs`, and `WithoutPrompt()` projection behavior.
 - Preserves all exported storage method signatures.
 
 - [ ] **Step 1: Run characterization tests**
@@ -379,31 +399,49 @@ Use `jobRowFromModel`, explicit SQLite column lists, and `Returning("id")` where
 supported. Preserve UUID generation, machine ID assignment, dirty-file JSON,
 and time parsing. Use explicit select projections rather than `SELECT *`.
 
-- [ ] **Step 3: Convert `JobQuery` construction**
+- [ ] **Step 3: Convert `ListJobs` filter construction**
 
-Build one `*bun.SelectQuery`, append each current filter with `Where`, and keep
-the current ordering and limits. Implement `WithoutPrompt()` by selecting the
-same explicit column list minus `prompt`; never hydrate then discard it.
+Build one `*bun.SelectQuery` from the existing `ListJobsOption`,
+`listJobsOptions`, `buildJobFilterClause`, and `ListJobs` behavior. Preserve
+repo ID/path/prefix, git ref, branch, branch-or-empty, status, closed, review
+type, job type, minimum ID, panel run/role, classify-job exclusion, ordering,
+cursor, and limit semantics. Implement `WithoutPrompt()` by selecting the same
+explicit column list minus `prompt`; never hydrate then discard it.
 
-- [ ] **Step 4: Convert guarded job transitions**
+- [ ] **Step 4: Commit job creation and query conversion**
+
+```bash
+git add internal/storage/jobs.go internal/storage/bun_models_jobs.go \
+  internal/storage/*job*_test.go internal/storage/db_filter_test.go
+git commit -m "Move job creation and queries to Bun"
+```
+
+- [ ] **Step 5: Convert guarded job transitions**
 
 Use Bun updates for ordinary transitions. Keep raw Bun queries for atomic claims
 and compare-and-set updates where affected-row counts are part of correctness.
 Add an allowlist comment above each retained raw statement.
 
-- [ ] **Step 5: Convert review and response persistence**
+- [ ] **Step 6: Commit job transition conversion**
+
+```bash
+git add internal/storage/jobs.go internal/storage/db_job_test.go
+git commit -m "Move job transitions to Bun"
+```
+
+- [ ] **Step 7: Convert review and response persistence**
 
 Use Bun inserts and selects with explicit columns. Preserve one-review-per-job,
 closed-state updates, append-only response semantics, sync timestamps, and
 review verdict backfills.
 
-- [ ] **Step 6: Convert hydration, verdict, and cost queries**
+- [ ] **Step 8: Convert hydration, verdict, and cost queries**
 
 Keep aggregate work in SQL/Bun query builders; do not load rows and aggregate in
 Go. Preserve current `COALESCE`, timing, and agent-invocation eligibility
 semantics.
 
-- [ ] **Step 7: Run focused and package tests**
+- [ ] **Step 9: Run focused and package tests**
 
 ```bash
 go test ./internal/storage -run \
@@ -413,7 +451,7 @@ go test ./internal/storage -count=1
 
 Expected: PASS.
 
-- [ ] **Step 8: Commit primary domain conversion**
+- [ ] **Step 10: Commit review and hydration conversion**
 
 ```bash
 git add internal/storage/jobs.go internal/storage/reviews.go \
@@ -535,27 +573,43 @@ Use canonical rows plus explicit PostgreSQL columns. Express the existing
 field-by-field `ON CONFLICT` policies with Bun's `On` and `Set` APIs when clear;
 otherwise retain the statement as a commented allowlisted Bun raw query.
 
-- [ ] **Step 5: Convert pull queries**
+- [ ] **Step 5: Commit PostgreSQL schema and push conversion**
+
+```bash
+git add internal/storage/postgres.go internal/storage/*postgres*_test.go
+git commit -m "Move PostgreSQL sync writes to Bun"
+```
+
+- [ ] **Step 6: Convert pull queries**
 
 Build Bun selects for jobs, reviews, and responses with the exact existing
 keyset predicates and ordering. Scan directly into projection rows, then map to
 `PulledJob`, `PulledReview`, and `PulledResponse`. Preserve known-job filtering
 for reviews and timestamp/ID cursors.
 
-- [ ] **Step 6: Convert SQLite sync extraction and merges**
+- [ ] **Step 7: Convert SQLite sync extraction and merges**
 
 Use Bun selects for local push candidates and Bun transactions for pulled-row
 merges. Preserve local-only fields, placeholder repo behavior, stale-update
 guards, and synced-at updates.
 
-- [ ] **Step 7: Retain or simplify pgx batches**
+- [ ] **Step 8: Retain or simplify pgx batches**
 
 Keep `pgx.Batch` for review, response, or job operations where per-item results
 and fallback behavior are clearer than a Bun bulk insert. Route all non-batch
 operations through Bun. Ensure both paths use `PgPool.pool` and the Bun wrapper
 created from that same pool.
 
-- [ ] **Step 8: Run untagged and PostgreSQL tests**
+- [ ] **Step 9: Commit pull and local-merge conversion**
+
+```bash
+git add internal/storage/postgres.go internal/storage/sync.go \
+  internal/storage/syncworker.go internal/storage/*postgres*_test.go \
+  internal/storage/sync*_test.go
+git commit -m "Move sync pulls and local merges to Bun"
+```
+
+- [ ] **Step 10: Run untagged and PostgreSQL tests**
 
 ```bash
 go test ./internal/storage -count=1
@@ -564,7 +618,7 @@ go test -tags=postgres ./internal/storage -count=1
 
 Expected: PASS.
 
-- [ ] **Step 9: Commit PostgreSQL and sync conversion**
+- [ ] **Step 11: Commit remaining PostgreSQL cleanup**
 
 ```bash
 git add internal/storage/postgres.go internal/storage/sync.go \
@@ -592,7 +646,7 @@ git commit -m "Unify PostgreSQL sync access with Bun"
 Run:
 
 ```bash
-rg -n '\.(Exec|Query|QueryRow|Prepare|Begin)\(' internal/storage \
+rg -n '\.(Exec|Query|QueryRow|Prepare|Begin)(Context|Tx)?\(|NewRaw\(|SendBatch\(' internal/storage \
   internal/daemon cmd/roborev -g '*.go' -g '!*_test.go'
 ```
 
@@ -674,6 +728,11 @@ git log --oneline origin/main..HEAD
 
 Expected: only Bun refactor, tests, and documentation changes; each staged
 domain has its own commit.
+
+Remote pull/rebase/push is intentionally not automatic in this plan because
+the repository forbids those operations without explicit user authorization.
+When authorization is provided, perform the requested synchronization and
+verify the branch is up to date with its remote.
 
 - [ ] **Step 5: Create a final regression-fix commit only if needed**
 
