@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	neturl "net/url"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -491,6 +492,44 @@ func (m model) fetchBranchesForRepo(
 	}
 }
 
+// backfillBranchValue decides what branch value, if any, to persist for a
+// job with no stored branch. ok=false means the row is deliberately left
+// unbackfilled: a detached single-commit review renders a
+// "(detached @ <sha>)" placeholder from its empty stored branch, and
+// persisting the branchNone sentinel would freeze the row at "(none)"
+// (#499). Backfill runs once per TUI session (branchBackfillDone), so the
+// repeated lookup cost for skipped rows is bounded.
+func backfillBranchValue(job storage.ReviewJob, machineID string) (string, bool) {
+	// Mark task jobs (run, analyze, custom) or dirty jobs with no-branch sentinel
+	if job.IsTaskJob() || job.IsDirtyJob() {
+		return branchNone, true
+	}
+	// Mark remote jobs with no-branch sentinel (can't look up)
+	if job.RepoPath == "" || (machineID != "" && job.SourceMachineID != "" && job.SourceMachineID != machineID) {
+		return branchNone, true
+	}
+
+	// Preserve the old sentinel backfill when the repo cannot be verified
+	// locally: an empty lookup there means "couldn't look", not "detached",
+	// and skipping would strand the row with NullsRemaining nonzero.
+	if _, err := os.Stat(job.RepoPath); err != nil {
+		return branchNone, true
+	}
+
+	sha := job.GitRef
+	if idx := strings.Index(sha, ".."); idx != -1 {
+		sha = sha[idx+2:]
+	}
+	branch := git.GetBranchName(job.RepoPath, sha)
+	if branch == "" {
+		if detachedBranchLabel(job) != "" {
+			return "", false
+		}
+		branch = branchNone // Mark as attempted but not found
+	}
+	return branch, true
+}
+
 func (m model) backfillBranches() tea.Cmd {
 	// Capture values for use in goroutine
 	machineID := m.status.MachineID
@@ -521,24 +560,9 @@ func (m model) backfillBranches() tea.Cmd {
 				if job.Branch != "" {
 					continue // Already has branch
 				}
-				// Mark task jobs (run, analyze, custom) or dirty jobs with no-branch sentinel
-				if job.IsTaskJob() || job.IsDirtyJob() {
-					toBackfill = append(toBackfill, backfillJob{id: job.ID, branch: branchNone})
+				branch, ok := backfillBranchValue(job, machineID)
+				if !ok {
 					continue
-				}
-				// Mark remote jobs with no-branch sentinel (can't look up)
-				if job.RepoPath == "" || (machineID != "" && job.SourceMachineID != "" && job.SourceMachineID != machineID) {
-					toBackfill = append(toBackfill, backfillJob{id: job.ID, branch: branchNone})
-					continue
-				}
-
-				sha := job.GitRef
-				if idx := strings.Index(sha, ".."); idx != -1 {
-					sha = sha[idx+2:]
-				}
-				branch := git.GetBranchName(job.RepoPath, sha)
-				if branch == "" {
-					branch = branchNone // Mark as attempted but not found
 				}
 				toBackfill = append(toBackfill, backfillJob{id: job.ID, branch: branch})
 			}
@@ -706,7 +730,10 @@ func (m model) fetchReview(jobID int64) tea.Cmd {
 // It prefers the stored job.Branch (set at enqueue time) over a dynamic
 // git name-rev lookup, which can be misled by worktree branches
 // reachable from the same SHA. Falls back to git lookup only for
-// single-commit reviews when the stored branch is empty.
+// single-commit reviews when the stored branch is empty, and finally to
+// a "(detached @ <sha>)" placeholder when neither resolves a branch, so a
+// commit made on top of a detached HEAD doesn't render as a blank field
+// (#499).
 func reviewBranchName(job *storage.ReviewJob) string {
 	if job == nil {
 		return ""
@@ -718,9 +745,11 @@ func reviewBranchName(job *storage.ReviewJob) string {
 		return job.Branch
 	}
 	if job.RepoPath != "" && !strings.Contains(job.GitRef, "..") {
-		return git.GetBranchName(job.RepoPath, job.GitRef)
+		if branch := git.GetBranchName(job.RepoPath, job.GitRef); branch != "" {
+			return branch
+		}
 	}
-	return ""
+	return detachedBranchLabel(*job)
 }
 
 func (m model) fetchReviewForPrompt(jobID int64) tea.Cmd {

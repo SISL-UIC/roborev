@@ -54,12 +54,17 @@ func TestReviewBranchName(t *testing.T) {
 		},
 		{
 			name: "branchNone sentinel treated as empty",
-			job:  &storage.ReviewJob{Branch: "(none)", GitRef: "abc123"},
+			job:  &storage.ReviewJob{JobType: storage.JobTypeReview, Branch: "(none)", GitRef: "abc123"},
 			want: "",
 		},
 		{
 			name: "branchNone with repo path skips git lookup",
-			job:  &storage.ReviewJob{Branch: "(none)", GitRef: "abc123", RepoPath: "/tmp/repo"},
+			job:  &storage.ReviewJob{JobType: storage.JobTypeReview, Branch: "(none)", GitRef: "abc123", RepoPath: "/nonexistent/repo"},
+			want: "",
+		},
+		{
+			name: "branchNone on task job stays empty",
+			job:  &storage.ReviewJob{JobType: storage.JobTypeTask, Branch: "(none)", GitRef: "abc123"},
 			want: "",
 		},
 		{
@@ -71,6 +76,30 @@ func TestReviewBranchName(t *testing.T) {
 			name: "no stored branch and no repo path",
 			job:  &storage.ReviewJob{GitRef: "abc123"},
 			want: "",
+		},
+		{
+			name: "detached panel synthesis row shows placeholder instead of blank",
+			job: &storage.ReviewJob{
+				JobType: storage.JobTypeSynthesis,
+				GitRef:  "abc1234567",
+				CommitID: func() *int64 {
+					id := int64(2)
+					return &id
+				}(),
+			},
+			want: "(detached @ abc1234)",
+		},
+		{
+			name: "detached commit review shows placeholder instead of blank",
+			job: &storage.ReviewJob{
+				JobType: storage.JobTypeReview,
+				GitRef:  "abc1234567",
+				CommitID: func() *int64 {
+					id := int64(1)
+					return &id
+				}(),
+			},
+			want: "(detached @ abc1234)",
 		},
 	}
 	for _, tt := range tests {
