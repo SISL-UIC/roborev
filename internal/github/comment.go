@@ -7,7 +7,7 @@ import (
 	"log"
 	"strings"
 
-	googlegithub "github.com/google/go-github/v88/github"
+	googlegithub "github.com/google/go-github/v89/github"
 
 	"go.kenn.io/roborev/internal/review"
 )
