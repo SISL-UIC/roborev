@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -1136,6 +1137,56 @@ func TestSyncConfigPostgresURLExpanded(t *testing.T) {
 				return false
 			}, "Expected %q, got %q", expected, got)
 		}
+	})
+}
+
+func TestSyncConfigPostgresURLExpandedFileRef(t *testing.T) {
+	dir := t.TempDir()
+	pwFile := filepath.Join(dir, "pg.pw")
+	require.NoError(t, os.WriteFile(pwFile, []byte("s3cr3t\n"), 0o600))
+
+	t.Run("file ref is read and trimmed", func(t *testing.T) {
+		cfg := SyncConfig{PostgresURL: "postgres://user:${file:" + pwFile + "}@localhost:5432/db"}
+		assert.Equal(t, "postgres://user:s3cr3t@localhost:5432/db", cfg.PostgresURLExpanded())
+	})
+
+	t.Run("file ref escapes reserved URL characters", func(t *testing.T) {
+		reservedPWFile := filepath.Join(dir, "reserved.pw")
+		require.NoError(t, os.WriteFile(reservedPWFile, []byte("p/a#s?s%@word:\n"), 0o600))
+
+		cfg := SyncConfig{PostgresURL: "postgres://user:${file:" + reservedPWFile + "}@localhost:5432/db"}
+		expanded := cfg.PostgresURLExpanded()
+		assert.Equal(t, "postgres://user:p%2Fa%23s%3Fs%25%40word%3A@localhost:5432/db", expanded)
+
+		parsed, err := url.Parse(expanded)
+		require.NoError(t, err)
+		require.NotNil(t, parsed.User)
+		password, present := parsed.User.Password()
+		require.True(t, present)
+		assert.Equal(t, "p/a#s?s%@word:", password)
+	})
+
+	t.Run("file ref and env var expand together", func(t *testing.T) {
+		t.Setenv("PG_HOST", "hub.example")
+		cfg := SyncConfig{PostgresURL: "postgres://user:${file:" + pwFile + "}@${PG_HOST}:5432/db"}
+		assert.Equal(t, "postgres://user:s3cr3t@hub.example:5432/db", cfg.PostgresURLExpanded())
+	})
+
+	t.Run("unreadable file ref becomes empty (fails at dial, no leak)", func(t *testing.T) {
+		cfg := SyncConfig{PostgresURL: "postgres://user:${file:" + filepath.Join(dir, "missing") + "}@localhost:5432/db"}
+		assert.Equal(t, "postgres://user:@localhost:5432/db", cfg.PostgresURLExpanded())
+	})
+
+	t.Run("Validate warns when the password file is missing", func(t *testing.T) {
+		cfg := SyncConfig{Enabled: true, PostgresURL: "postgres://user:${file:" + filepath.Join(dir, "nope") + "}@localhost:5432/db"}
+		warnings := cfg.Validate()
+		require.Len(t, warnings, 1)
+		assert.Contains(t, warnings[0], "file that cannot be read")
+	})
+
+	t.Run("Validate is quiet when the file exists", func(t *testing.T) {
+		cfg := SyncConfig{Enabled: true, PostgresURL: "postgres://user:${file:" + pwFile + "}@localhost:5432/db"}
+		assert.Empty(t, cfg.Validate())
 	})
 }
 
