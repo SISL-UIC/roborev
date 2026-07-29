@@ -971,6 +971,124 @@ func TestResolveExcludePatternsLocal(t *testing.T) {
 	})
 }
 
+func TestResolveACPAgentConfigFromConfigMergesByName(t *testing.T) {
+	global := &Config{ACP: ACPAgentConfigs{
+		"goose": {Command: "global-goose", Model: "global-model"},
+		"foo":   {Command: "foo-acp"},
+	}}
+	repo := &RepoConfig{ACP: ACPAgentConfigs{
+		"goose": {Command: "repo-goose"},
+	}}
+
+	goose, ok := ResolveACPAgentConfigFromConfig("goose", repo, global)
+	require.True(t, ok)
+	assert.Equal(t, "repo-goose", goose.Command)
+	assert.Empty(t, goose.Model)
+
+	foo, ok := ResolveACPAgentConfigFromConfig("foo", repo, global)
+	require.True(t, ok)
+	assert.Equal(t, "foo-acp", foo.Command)
+
+	_, ok = ResolveACPAgentConfigFromConfig("missing", repo, global)
+	assert.False(t, ok)
+}
+
+func TestResolveACPAgentConfigsFromConfigReturnsIndependentMerge(t *testing.T) {
+	global := &Config{ACP: ACPAgentConfigs{
+		"goose": {Command: "global-goose"},
+		"foo":   {Command: "foo-acp", Args: []string{"serve"}},
+	}}
+	repo := &RepoConfig{ACP: ACPAgentConfigs{
+		"goose": {Command: "repo-goose"},
+	}}
+
+	merged := ResolveACPAgentConfigsFromConfig(repo, global)
+	assert.Equal(t, ACPAgentConfigs{
+		"goose": {Command: "repo-goose"},
+		"foo":   {Command: "foo-acp", Args: []string{"serve"}},
+	}, merged)
+
+	merged["foo"] = ACPAgentConfig{Command: "changed"}
+	assert.Equal(t, "foo-acp", global.ACP["foo"].Command)
+	merged = ResolveACPAgentConfigsFromConfig(repo, global)
+	merged["foo"].Args[0] = "changed"
+	assert.Equal(t, "serve", global.ACP["foo"].Args[0])
+}
+
+func TestLoadConfigRejectsLegacyACPShapeWithMigrationHint(t *testing.T) {
+	legacy := []byte("[acp]\nname = \"goose\"\ncommand = \"goose\"\n")
+
+	globalPath := filepath.Join(t.TempDir(), "config.toml")
+	require.NoError(t, os.WriteFile(globalPath, legacy, 0o600))
+	_, err := LoadGlobalFrom(globalPath)
+	require.ErrorContains(t, err, "move it to [acp.goose]")
+
+	repo := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(repo, ".roborev.toml"), legacy, 0o644))
+	_, err = LoadRepoConfig(repo)
+	require.ErrorContains(t, err, "move it to [acp.goose]")
+}
+
+func TestLoadGlobalNamedACPAgent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	require.NoError(t, os.WriteFile(path, []byte(`
+fix_agent = "acp.goose"
+
+[acp.goose]
+command = "goose"
+args = ["acp"]
+model = "configured-model"
+`), 0o600))
+
+	cfg, err := LoadGlobalFrom(path)
+	require.NoError(t, err)
+	assert.Equal(t, "acp.goose", cfg.FixAgent)
+	goose, ok := ResolveACPAgentConfigFromConfig("goose", nil, cfg)
+	require.True(t, ok)
+	assert.Equal(t, "goose", goose.Command)
+	assert.Equal(t, []string{"acp"}, goose.Args)
+	assert.Equal(t, "configured-model", goose.Model)
+}
+
+func TestLoadConfigRejectsInvalidNamedACPAgents(t *testing.T) {
+	tests := []struct {
+		name      string
+		toml      string
+		wantError string
+	}{
+		{name: "empty name", toml: "[acp.\"\"]\ncommand = \"goose\"\n", wantError: "empty ACP agent name"},
+		{name: "missing command", toml: "[acp.goose]\nargs = [\"acp\"]\n", wantError: "requires a command"},
+		{name: "built-in", toml: "[acp.codex]\ncommand = \"goose\"\n", wantError: "conflicts with built-in agent"},
+		{name: "alias", toml: "[acp.claude]\ncommand = \"goose\"\n", wantError: "conflicts with built-in agent"},
+		{name: "dotted name", toml: "[acp.\"foo.bar\"]\ncommand = \"foo-acp\"\n", wantError: "must not contain dots"},
+		{name: "bare custom reference", toml: "fix_agent = \"goose\"\n", wantError: `must use "acp.goose"`},
+		{name: "bare nested panel reference", toml: "[review.subagents.only]\nagent = \"goose\"\n", wantError: `must use "acp.goose"`},
+		{name: "bare CI agent reference", toml: "[ci]\nagents = [\"goose\"]\n", wantError: `must use "acp.goose"`},
+		{name: "bare CI reviews key", toml: "[ci.reviews]\ngoose = [\"default\"]\n", wantError: `must use "acp.goose"`},
+	}
+
+	for _, scope := range []string{"global", "repository"} {
+		for _, tc := range tests {
+			t.Run(scope+"/"+tc.name, func(t *testing.T) {
+				dir := t.TempDir()
+				path := filepath.Join(dir, "config.toml")
+				if scope == "repository" {
+					path = filepath.Join(dir, ".roborev.toml")
+				}
+				require.NoError(t, os.WriteFile(path, []byte(tc.toml), 0o600))
+
+				var err error
+				if scope == "global" {
+					_, err = LoadGlobalFrom(path)
+				} else {
+					_, err = LoadRepoConfig(dir)
+				}
+				require.ErrorContains(t, err, tc.wantError)
+			})
+		}
+	}
+}
+
 func TestIsCommitMessageExcluded(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -2169,36 +2287,36 @@ func TestResolveAnalyzeConfig(t *testing.T) {
 	}{
 		{
 			name:     "repo analysis table overrides workflow fallback",
-			repo:     "[analyze.refactor]\nagent = \"repo-agent\"\nmodel = \"repo-model\"\n",
+			repo:     "[analyze.refactor]\nagent = \"gemini\"\nmodel = \"repo-model\"\n",
 			global:   &Config{ReviewAgent: "global-review", ReviewModel: "global-review-model"},
 			analysis: "refactor", fallback: "review", reasoning: "standard",
-			wantAgent: "repo-agent", wantModel: "repo-model",
+			wantAgent: "gemini", wantModel: "repo-model",
 		},
 		{
 			name:     "global analysis table used when repo lacks entry",
-			repo:     "review_agent = \"repo-review\"\n",
+			repo:     "review_agent = \"gemini\"\n",
 			global:   &Config{Analyze: map[string]AnalyzeConfig{"refactor": {Agent: "global-agent", Model: "global-model"}}},
 			analysis: "refactor", fallback: "review", reasoning: "standard",
-			wantAgent: "repo-review", wantModel: "global-model",
+			wantAgent: "gemini", wantModel: "global-model",
 		},
 		{
 			name:     "cli agent and model override analysis table",
 			cliAgent: "cli-agent", cliModel: "cli-model",
-			repo:     "[analyze.refactor]\nagent = \"repo-agent\"\nmodel = \"repo-model\"\n",
+			repo:     "[analyze.refactor]\nagent = \"gemini\"\nmodel = \"repo-model\"\n",
 			analysis: "refactor", fallback: "review", reasoning: "standard",
 			wantAgent: "cli-agent", wantModel: "cli-model",
 		},
 		{
 			name:     "missing analysis table falls back to workflow",
-			repo:     "review_agent = \"repo-review\"\nreview_model = \"repo-review-model\"\n",
+			repo:     "review_agent = \"gemini\"\nreview_model = \"repo-review-model\"\n",
 			analysis: "duplication", fallback: "review", reasoning: "standard",
-			wantAgent: "repo-review", wantModel: "repo-review-model",
+			wantAgent: "gemini", wantModel: "repo-review-model",
 		},
 		{
 			name:     "security analysis falls back to security workflow",
-			repo:     "review_agent = \"repo-review\"\nsecurity_agent = \"repo-security\"\n",
+			repo:     "review_agent = \"gemini\"\nsecurity_agent = \"claude-code\"\n",
 			analysis: "security", fallback: "security", reasoning: "standard",
-			wantAgent: "repo-security",
+			wantAgent: "claude-code",
 		},
 	}
 
@@ -2394,7 +2512,7 @@ func TestResolveBackupAgentForWorkflow(t *testing.T) {
 		{"global backup for design", nil, &Config{DesignBackupAgent: "droid"}, "design", "droid"},
 
 		// Repo backup agent overrides global
-		{"repo overrides global", M{"review_backup_agent": "repo-test"}, &Config{ReviewBackupAgent: "global-test"}, "review", "repo-test"},
+		{"repo overrides global", M{"review_backup_agent": "test"}, &Config{ReviewBackupAgent: "global-test"}, "review", "test"},
 		{"repo backup only", M{"review_backup_agent": "test"}, nil, "review", "test"},
 
 		// Different workflows resolve independently
@@ -2414,11 +2532,11 @@ func TestResolveBackupAgentForWorkflow(t *testing.T) {
 		{"global default_backup_agent for any workflow", nil, &Config{DefaultBackupAgent: "test"}, "fix", "test"},
 		{"global workflow-specific overrides default", nil, &Config{DefaultBackupAgent: "test", ReviewBackupAgent: "claude"}, "review", "claude"},
 		{"global default used when workflow not set", nil, &Config{DefaultBackupAgent: "test", ReviewBackupAgent: "claude"}, "fix", "test"},
-		{"repo backup_agent generic", M{"backup_agent": "repo-fallback"}, nil, "review", "repo-fallback"},
-		{"repo backup_agent generic for any workflow", M{"backup_agent": "repo-fallback"}, nil, "refine", "repo-fallback"},
-		{"repo workflow-specific overrides repo generic", M{"backup_agent": "generic", "review_backup_agent": "specific"}, nil, "review", "specific"},
-		{"repo generic overrides global workflow-specific", M{"backup_agent": "repo"}, &Config{ReviewBackupAgent: "global"}, "review", "repo"},
-		{"repo generic overrides global default", M{"backup_agent": "repo"}, &Config{DefaultBackupAgent: "global"}, "review", "repo"},
+		{"repo backup_agent generic", M{"backup_agent": "gemini"}, nil, "review", "gemini"},
+		{"repo backup_agent generic for any workflow", M{"backup_agent": "gemini"}, nil, "refine", "gemini"},
+		{"repo workflow-specific overrides repo generic", M{"backup_agent": "codex", "review_backup_agent": "gemini"}, nil, "review", "gemini"},
+		{"repo generic overrides global workflow-specific", M{"backup_agent": "gemini"}, &Config{ReviewBackupAgent: "global"}, "review", "gemini"},
+		{"repo generic overrides global default", M{"backup_agent": "gemini"}, &Config{DefaultBackupAgent: "global"}, "review", "gemini"},
 	}
 
 	for _, tt := range tests {
@@ -3343,6 +3461,17 @@ func TestLoadRepoConfigFromRef(t *testing.T) {
 		}
 		require.NotNil(t, cfg, "expected non-nil config")
 		assert.Equal(t, "Use descriptive variable names.", cfg.ReviewGuidelines, "got review guidelines")
+	})
+
+	t.Run("classifies invalid ACP config as parse error", func(t *testing.T) {
+		writeTestFile(t, dir, ".roborev.toml", "[acp.codex]\ncommand = \"goose\"\n")
+		execGit(t, dir, "add", ".roborev.toml")
+		execGit(t, dir, "commit", "-m", "add invalid ACP config")
+		invalidSHA := execGit(t, dir, "rev-parse", "HEAD")
+
+		_, err := LoadRepoConfigFromRef(dir, invalidSHA)
+		require.Error(t, err)
+		assert.True(t, IsConfigParseError(err))
 	})
 
 	t.Run("returns nil for nonexistent ref", func(t *testing.T) {

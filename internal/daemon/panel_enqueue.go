@@ -423,7 +423,10 @@ func (s *Server) enqueuePanelRun(ctx context.Context, in panelRunInputs) (*RawJS
 
 	runUUID := uuid.NewString()
 	memberOpts := panelMemberOpts(in.descriptor, in.panelName, runUUID, members, in.resolutionPath, in.cfg)
-	synthOpts := panelSynthesisOpts(in.descriptor, in.panelName, runUUID, synth)
+	repoCfg, _ := config.LoadRepoConfig(in.resolutionPath)
+	synthOpts := panelSynthesisOpts(
+		in.descriptor, in.panelName, runUUID, synth, repoCfg, in.cfg,
+	)
 
 	var memberJobs []*storage.ReviewJob
 	var synthJob *storage.ReviewJob
@@ -516,9 +519,11 @@ func panelMemberOpts(
 func resolvePanelMemberExecution(
 	m config.ResolvedMember, descriptor targetDescriptor, repoPath string, cfg *config.Config,
 ) (string, string) {
-	agentName, model := m.Agent, m.Model
-	resolution, err := agent.ResolveWorkflowConfig(
-		m.Agent, repoPath, cfg, workflowForPanelReviewType(m.ReviewType), m.Reasoning,
+	repoCfg, _ := config.LoadRepoConfig(repoPath)
+	agentName := agent.StorageNameFromConfig(m.Agent, repoCfg, cfg)
+	model := m.Model
+	resolution, err := agent.ResolveWorkflowConfigFromConfig(
+		m.Agent, repoCfg, cfg, workflowForPanelReviewType(m.ReviewType), m.Reasoning,
 	)
 	if err != nil {
 		return agentName, model
@@ -530,20 +535,20 @@ func resolvePanelMemberExecution(
 		strings.TrimSpace(resolution.BackupAgent) != ""
 	var selected agent.Agent
 	if strictWorkflowAgent {
-		selected, err = agent.GetPreferredOrBackupWithConfig(
-			repoPath, resolution.PreferredAgent, cfg, resolution.BackupAgent,
+		selected, err = agent.GetPreferredOrBackupWithConfigFromConfig(
+			repoCfg, resolution.PreferredAgent, cfg, resolution.BackupAgent,
 		)
 	} else {
-		selected, err = agent.GetAvailableWithConfig(
-			repoPath, resolution.PreferredAgent, cfg, resolution.BackupAgent,
+		selected, err = agent.GetAvailableWithConfigFromConfig(
+			repoCfg, resolution.PreferredAgent, cfg, resolution.BackupAgent,
 		)
 	}
 	if err != nil {
 		return agentName, model
 	}
-	selectedName := selected.Name()
-	if !resolution.AgentMatches(selectedName, agentName) {
-		model = resolution.ModelForSelectedAgent(selectedName, descriptor.requestedModel)
+	selectedName := agent.StorageNameFromConfig(selected.Name(), repoCfg, cfg)
+	if !m.ModelExplicit || !resolution.AgentMatches(selectedName, m.Agent) {
+		model = resolution.ModelForSelectedAgent(selectedName, "")
 	}
 	return selectedName, model
 }
@@ -560,11 +565,14 @@ func workflowForPanelReviewType(reviewType string) string {
 func panelSynthesisOpts(
 	descriptor targetDescriptor, panelName, runUUID string,
 	synth config.SynthesisSpec,
+	repoCfg *config.RepoConfig, cfg *config.Config,
 ) storage.EnqueueOpts {
 	o := descriptor.baseOpts()
 	o.JobType = storage.JobTypeSynthesis
-	o.Agent, o.Model, o.Reasoning = synth.Agent, synth.Model, synth.Reasoning
-	o.BackupAgent, o.BackupModel = synth.BackupAgent, synth.BackupModel
+	o.Agent = agent.StorageNameFromConfig(synth.Agent, repoCfg, cfg)
+	o.Model, o.Reasoning = synth.Model, synth.Reasoning
+	o.BackupAgent = agent.StorageNameFromConfig(synth.BackupAgent, repoCfg, cfg)
+	o.BackupModel = synth.BackupModel
 	o.PanelRunUUID, o.PanelRole = runUUID, storage.PanelRoleSynthesis
 	o.PanelName, o.ClaimBlocked = panelName, true
 	return o

@@ -3033,7 +3033,7 @@ func TestResolveMatrixMemberAgentBlankAgentAutoDetectsAvailableAgent(t *testing.
 	agent.Register(&agent.FakeAgent{NameStr: "ci-auto-daemon"})
 	t.Cleanup(func() { agent.Unregister("ci-auto-daemon") })
 
-	resolvedAgent, resolvedModel, err := h.Poller.resolveMatrixMemberAgent(
+	resolvedAgent, resolvedModel, _, _, err := h.Poller.resolveMatrixMemberAgent(
 		h.Repo,
 		nil,
 		h.Cfg,
@@ -3056,7 +3056,7 @@ func TestResolveMatrixMemberAgentBlankAgentHonorsConfiguredCommandOverride(t *te
 	t.Setenv("PATH", binDir)
 	h.Cfg.CodexCmd = "ci-codex"
 
-	resolvedAgent, resolvedModel, err := h.Poller.resolveMatrixMemberAgent(
+	resolvedAgent, resolvedModel, _, _, err := h.Poller.resolveMatrixMemberAgent(
 		h.Repo,
 		nil,
 		h.Cfg,
@@ -3075,7 +3075,7 @@ func TestResolveMatrixMemberAgentBlankAgentWithExplicitBackupStaysStrict(t *test
 	agent.Register(&agent.FakeAgent{NameStr: "ci-unrelated-daemon"})
 	t.Cleanup(func() { agent.Unregister("ci-unrelated-daemon") })
 
-	resolvedAgent, resolvedModel, err := h.Poller.resolveMatrixMemberAgent(
+	resolvedAgent, resolvedModel, _, _, err := h.Poller.resolveMatrixMemberAgent(
 		h.Repo,
 		nil,
 		h.Cfg,
@@ -3095,7 +3095,7 @@ func TestResolveMatrixMemberAgentBlankAgentWithExplicitPrimaryStaysStrict(t *tes
 	agent.Register(&agent.FakeAgent{NameStr: "ci-unrelated-primary"})
 	t.Cleanup(func() { agent.Unregister("ci-unrelated-primary") })
 
-	resolvedAgent, resolvedModel, err := h.Poller.resolveMatrixMemberAgent(
+	resolvedAgent, resolvedModel, _, _, err := h.Poller.resolveMatrixMemberAgent(
 		h.Repo,
 		nil,
 		h.Cfg,
@@ -3119,8 +3119,7 @@ func TestResolveMatrixMemberAgentUsesPassedRepoConfigForACPAvailability(t *testi
 	require.NoError(t, os.WriteFile(acpCmd, []byte("#!/bin/sh\nexit 0\n"), 0o755))
 	t.Setenv("PATH", binDir)
 
-	localConfig := "[acp]\n" +
-		"name = \"branch-acp\"\n" +
+	localConfig := "[acp.branch-acp]\n" +
 		"command = \"missing-local-acp\"\n" +
 		"model = \"local-model\"\n"
 	require.NoError(
@@ -3128,23 +3127,22 @@ func TestResolveMatrixMemberAgentUsesPassedRepoConfigForACPAvailability(t *testi
 		os.WriteFile(filepath.Join(h.RepoPath, ".roborev.toml"), []byte(localConfig), 0o644),
 	)
 
-	repoCfg := &config.RepoConfig{
-		ACP: &config.ACPAgentConfig{
-			Name:    "branch-acp",
+	repoCfg := &config.RepoConfig{ACP: config.ACPAgentConfigs{
+		"branch-acp": {
 			Command: "branch-acp",
 			Model:   "branch-model",
 		},
-	}
+	}}
 
-	resolvedAgent, resolvedModel, err := h.Poller.resolveMatrixMemberAgent(
+	resolvedAgent, resolvedModel, _, _, err := h.Poller.resolveMatrixMemberAgent(
 		h.Repo,
 		repoCfg,
 		h.Cfg,
-		config.AgentReviewType{Agent: "branch-acp", ReviewType: "default"},
+		config.AgentReviewType{Agent: "acp.branch-acp", ReviewType: "default"},
 		"standard",
 	)
 	require.NoError(t, err)
-	assert.Equal(t, "acp", resolvedAgent)
+	assert.Equal(t, "acp.branch-acp", resolvedAgent)
 	assert.Equal(t, "branch-model", resolvedModel)
 }
 
@@ -3493,6 +3491,50 @@ func TestProcessPRAutoDesignUsesConfiguredBackupModel(t *testing.T) {
 	assert.Equal("design-backup-model", design.Model)
 }
 
+func TestProcessPRAutoDesignPersistsNamedACPBackupSnapshot(t *testing.T) {
+	p, db, _, repo, cfg := newCIPanelGitHarness(t)
+	cfg.DesignAgent = "test"
+	cfg.DesignBackupAgent = "acp.goose"
+	cfg.DesignBackupModel = "goose-design-backup-model"
+	cfg.ACP = config.ACPAgentConfigs{
+		"goose": {Command: "goose-design-backup-acp"},
+	}
+	p.loadRepoConfigFn = func(string) (*config.RepoConfig, error) {
+		enabled := true
+		rc := &config.RepoConfig{}
+		rc.AutoDesignReview.Enabled = &enabled
+		return rc, nil
+	}
+
+	base := repo.HeadSHA()
+	head := repo.CommitFile("db/migrations/004_invoices.sql",
+		"CREATE TABLE invoices(id INT);\n", "feat: add invoices table")
+	p.mergeBaseFn = func(_, _, _ string) (string, error) { return base, nil }
+
+	err := p.processPR(context.Background(), "acme/api", ghPR{
+		Number: 16, HeadRefOid: head, BaseRefName: "main",
+	}, cfg)
+	require.NoError(t, err)
+	panel, err := db.GetCIPanelByPRSHA("acme/api", 16, head)
+	require.NoError(t, err)
+	members, err := db.GetPanelMembers(panel.PanelRunUUID)
+	require.NoError(t, err)
+
+	var design *storage.ReviewJob
+	for i := range members {
+		if members[i].ReviewType == config.ReviewTypeDesign {
+			design = &members[i]
+			break
+		}
+	}
+	require.NotNil(t, design)
+	assert.Equal(t, "acp.goose", design.BackupAgent)
+	assert.Equal(t, "goose-design-backup-model", design.BackupModel)
+	var snapshot ciACPExecutionConfig
+	require.NoError(t, json.Unmarshal([]byte(design.PanelMemberConfigJSON), &snapshot))
+	assert.Equal(t, "goose-design-backup-acp", snapshot.ACP["goose"].Command)
+}
+
 func TestProcessPRAutoDesignUsesCIModelOverride(t *testing.T) {
 	assert := assert.New(t)
 	p, db, _, repo, cfg := newCIPanelGitHarness(t)
@@ -3694,6 +3736,43 @@ func TestProcessPRNamedPanelMembers(t *testing.T) {
 	}
 }
 
+func TestProcessPRNamedPanelACPMemberReplacesInheritedWorkflowModel(t *testing.T) {
+	p, db, _, repo, cfg := newCIPanelGitHarness(t)
+	cfg.CI.Panel = "ci"
+	cfg.ReviewModel = "foreign-workflow-model"
+	cfg.ACP = config.ACPAgentConfigs{
+		"goose": {Command: "goose", Model: "goose-model"},
+	}
+	cfg.Review = config.ReviewConfig{
+		Subagents: map[string]config.SubagentSpec{
+			"rev": {Agent: "acp.goose", ReviewType: "review"},
+		},
+		Panels: map[string]config.PanelSpec{
+			"ci": {Members: []string{"rev"}, SynthesisAgent: "test"},
+		},
+	}
+	p.loadRepoConfigFn = func(string) (*config.RepoConfig, error) {
+		return &config.RepoConfig{}, nil
+	}
+
+	base := repo.HeadSHA()
+	head := repo.CommitFile("app.go", "package app\n", "feat: app")
+	p.mergeBaseFn = func(_, _, _ string) (string, error) { return base, nil }
+
+	err := p.processPR(context.Background(), "acme/api", ghPR{
+		Number: 17, HeadRefOid: head, BaseRefName: "main",
+	}, cfg)
+	require.NoError(t, err)
+
+	panel, err := db.GetCIPanelByPRSHA("acme/api", 17, head)
+	require.NoError(t, err)
+	members, err := db.GetPanelMembers(panel.PanelRunUUID)
+	require.NoError(t, err)
+	require.Len(t, members, 1)
+	assert.Equal(t, "acp.goose", members[0].Agent)
+	assert.Equal(t, "goose-model", members[0].Model)
+}
+
 func TestProcessPRNamedPanelMemberUsesBackupModelWhenPreferredUnavailable(t *testing.T) {
 	assert := assert.New(t)
 	p, db, _, repo, cfg := newCIPanelGitHarness(t)
@@ -3711,7 +3790,7 @@ func TestProcessPRNamedPanelMemberUsesBackupModelWhenPreferredUnavailable(t *tes
 	cfg.ReviewBackupModel = "named-panel-backup-model"
 	cfg.Review = config.ReviewConfig{
 		Subagents: map[string]config.SubagentSpec{
-			"rev": {Agent: primaryAgent, ReviewType: "review"},
+			"rev": {Agent: primaryAgent, Model: "primary-only-model", ReviewType: "review"},
 		},
 		Panels: map[string]config.PanelSpec{
 			"ci": {Members: []string{"rev"}, SynthesisAgent: "test"},
@@ -4260,6 +4339,152 @@ func TestBuildPanelOpts_RecordsPRBranchOnJobs(t *testing.T) {
 		"CI synthesis job must record the PR base (target) branch so branch-filtered hooks fire")
 	assert.Empty(t, synthOpts.Branch,
 		"CI synthesis job must not set Branch (it would leak into branch-scoped local flows)")
+}
+
+func TestBuildPanelOptsSnapshotsEffectiveACPExecutionConfig(t *testing.T) {
+	p := &CIPoller{}
+	p.buildReviewPromptFn = func(context.Context, string, string, int64, int, string, string, string, string, *config.Config) (string, error) {
+		return "prebuilt prompt", nil
+	}
+	cfg := config.DefaultConfig()
+	cfg.ACP = config.ACPAgentConfigs{
+		"owl":    {Command: "global-owl"},
+		"unused": {Command: "global-unused"},
+	}
+	repoCfg := &config.RepoConfig{ACP: config.ACPAgentConfigs{
+		"goose": {Command: "default-branch-goose", Args: []string{"acp"}},
+	}}
+
+	memberOpts, synthOpts, err := p.buildPanelOpts(context.Background(), buildPanelOptsInput{
+		repo:    &storage.Repo{ID: 1, RootPath: t.TempDir()},
+		repoCfg: repoCfg,
+		cfg:     cfg,
+		ghRepo:  "acme/widgets",
+		gitRef:  "base..head",
+		members: []config.ResolvedMember{{
+			Name: "reviewer", Agent: "acp.goose",
+			BackupAgent: "acp.owl", BackupModel: "owl-backup-model",
+		}},
+		synth: config.SynthesisSpec{
+			Agent: "acp.owl", BackupAgent: "acp.goose",
+		},
+	})
+	require.NoError(t, err)
+	require.Len(t, memberOpts, 1)
+	assert.Equal(t, "acp.goose", memberOpts[0].Agent)
+	assert.Equal(t, "acp.owl", memberOpts[0].BackupAgent)
+	assert.Equal(t, "owl-backup-model", memberOpts[0].BackupModel)
+
+	var memberSnapshot struct {
+		ACP config.ACPAgentConfigs `json:"acp"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(memberOpts[0].PanelMemberConfigJSON), &memberSnapshot))
+	assert.Equal(t, "default-branch-goose", memberSnapshot.ACP["goose"].Command)
+	assert.Equal(t, "global-owl", memberSnapshot.ACP["owl"].Command)
+	assert.NotContains(t, memberSnapshot.ACP, "unused")
+
+	var synthSnapshot struct {
+		ACP config.ACPAgentConfigs `json:"acp"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(synthOpts.PanelMemberConfigJSON), &synthSnapshot))
+	assert.Equal(t, "global-owl", synthSnapshot.ACP["owl"].Command)
+	assert.Equal(t, "default-branch-goose", synthSnapshot.ACP["goose"].Command)
+	assert.NotContains(t, synthSnapshot.ACP, "unused")
+	assert.Equal(t, "acp.owl", synthOpts.Agent)
+	assert.Equal(t, "acp.goose", synthOpts.BackupAgent)
+}
+
+func TestBuildPanelOptsRejectsACPReferencesMissingFromDefaultBranch(t *testing.T) {
+	repoPath := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(repoPath, ".roborev.toml"),
+		[]byte("[acp.goose]\ncommand = \"working-tree-goose\"\n"), 0o644))
+
+	tests := []struct {
+		name        string
+		members     []config.ResolvedMember
+		synth       config.SynthesisSpec
+		wantContext string
+	}{
+		{
+			name: "member primary",
+			members: []config.ResolvedMember{
+				{Name: "valid", Agent: "codex"},
+				{Name: "reviewer", Agent: "acp.goose"},
+			},
+			synth:       config.SynthesisSpec{Agent: "codex"},
+			wantContext: `panel member "reviewer"`,
+		},
+		{
+			name: "member backup",
+			members: []config.ResolvedMember{{
+				Name: "reviewer", Agent: "codex", BackupAgent: "acp.goose",
+			}},
+			synth:       config.SynthesisSpec{Agent: "codex"},
+			wantContext: `panel member "reviewer"`,
+		},
+		{
+			name:        "synthesis primary",
+			members:     []config.ResolvedMember{{Name: "reviewer", Agent: "codex"}},
+			synth:       config.SynthesisSpec{Agent: "acp.goose"},
+			wantContext: "synthesis",
+		},
+		{
+			name:    "synthesis backup",
+			members: []config.ResolvedMember{{Name: "reviewer", Agent: "codex"}},
+			synth: config.SynthesisSpec{
+				Agent: "codex", BackupAgent: "acp.goose",
+			},
+			wantContext: "synthesis",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := &CIPoller{}
+			p.buildReviewPromptFn = func(context.Context, string, string, int64, int, string, string, string, string, *config.Config) (string, error) {
+				return "prebuilt prompt", nil
+			}
+			memberOpts, synthOpts, err := p.buildPanelOpts(
+				context.Background(), buildPanelOptsInput{
+					repo:    &storage.Repo{ID: 1, RootPath: repoPath},
+					repoCfg: &config.RepoConfig{},
+					cfg:     config.DefaultConfig(),
+					ghRepo:  "acme/widgets",
+					gitRef:  "base..head",
+					members: tt.members,
+					synth:   tt.synth,
+				},
+			)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "acp.goose")
+			assert.Contains(t, err.Error(), "not configured")
+			assert.Contains(t, err.Error(), tt.wantContext)
+			assert.Empty(t, memberOpts)
+			assert.Equal(t, storage.EnqueueOpts{}, synthOpts)
+		})
+	}
+}
+
+func TestResolveCIPanelMemberExecutionPersistsNamedACPBackup(t *testing.T) {
+	t.Cleanup(testutil.MockExecutable(t, "goose-ci-backup-acp", 0))
+	cfg := config.DefaultConfig()
+	cfg.ReviewBackupAgent = "acp.goose"
+	cfg.ReviewBackupModel = "goose-backup-model"
+	cfg.ACP = config.ACPAgentConfigs{
+		"goose": {Command: "goose-ci-backup-acp"},
+	}
+
+	selected, model, backup, backupModel, err := (&CIPoller{}).resolveCIPanelMemberExecution(
+		&config.RepoConfig{}, cfg,
+		config.ResolvedMember{
+			Agent: "test", AgentExplicit: true, ReviewType: "default",
+		},
+	)
+	require.NoError(t, err)
+	assert.Equal(t, "test", selected)
+	assert.Empty(t, model)
+	assert.Equal(t, "acp.goose", backup)
+	assert.Equal(t, "goose-backup-model", backupModel)
 }
 
 // installFakeKata copies the test binary to a temp dir as `kata` and points

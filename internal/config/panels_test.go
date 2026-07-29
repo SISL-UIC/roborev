@@ -344,6 +344,77 @@ func TestResolvePanelExplicitSynthesisAgentSkipsGenericModel(t *testing.T) {
 	assert.Empty(synth.Model)
 }
 
+func TestResolvePanelNamedACPSynthesisUsesPairedModel(t *testing.T) {
+	global := &Config{
+		DefaultAgent: "codex",
+		FixModel:     "foreign-fix-model",
+		ACP: ACPAgentConfigs{
+			"goose": {Command: "goose", Model: "goose-model"},
+		},
+		Review: ReviewConfig{
+			Subagents: map[string]SubagentSpec{
+				"default": {Agent: "test", ReviewType: "default"},
+			},
+			Panels: map[string]PanelSpec{
+				"p": {Members: []string{"default"}, SynthesisAgent: "acp.goose"},
+			},
+		},
+	}
+
+	_, synth, err := ResolvePanel("p", "", global)
+	require.NoError(t, err)
+	assert.Equal(t, "acp.goose", synth.Agent)
+	assert.Equal(t, "goose-model", synth.Model)
+}
+
+func TestResolvePanelInheritedNamedACPSynthesisUsesPairedModel(t *testing.T) {
+	global := &Config{
+		DefaultAgent: "codex",
+		FixAgent:     "acp.goose",
+		FixModel:     "global-goose-model",
+		ACP: ACPAgentConfigs{
+			"goose": {Command: "goose", Model: "goose-model"},
+		},
+	}
+	repo := &RepoConfig{FixAgent: "acp.goose"}
+
+	synth, err := resolveSynthesisFromConfig(PanelSpec{}, repo, global)
+	require.NoError(t, err)
+	assert.Equal(t, "acp.goose", synth.Agent)
+	assert.Equal(t, "global-goose-model", synth.Model)
+}
+
+func TestResolvePanelInheritedNamedACPSynthesisUsesMatchingGlobalDefaultModel(t *testing.T) {
+	global := &Config{
+		DefaultAgent: "acp.goose",
+		DefaultModel: "global-default-model",
+		ACP: ACPAgentConfigs{
+			"goose": {Command: "goose", Model: "goose-model"},
+		},
+	}
+	repo := &RepoConfig{Agent: "acp.goose"}
+
+	synth, err := resolveSynthesisFromConfig(PanelSpec{}, repo, global)
+	require.NoError(t, err)
+	assert.Equal(t, "acp.goose", synth.Agent)
+	assert.Equal(t, "global-default-model", synth.Model)
+}
+
+func TestResolvePanelExplicitNamedACPSynthesisUsesMatchingRepoDefaultModel(t *testing.T) {
+	global := &Config{ACP: ACPAgentConfigs{
+		"goose": {Command: "goose", Model: "goose-model"},
+	}}
+	repo := &RepoConfig{
+		Agent: "acp.goose", Model: "repo-goose-model", FixAgent: "codex",
+	}
+
+	synth, err := resolveSynthesisFromConfig(
+		PanelSpec{SynthesisAgent: "acp.goose"}, repo, global,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, "repo-goose-model", synth.Model)
+}
+
 // TestResolveSynthesisBackupPassThrough verifies F7: synthesis_backup_agent /
 // synthesis_backup_model are passed straight through to SynthesisSpec.BackupAgent
 // / BackupModel with no resolution or fallback, via BOTH ResolvePanel and

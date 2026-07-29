@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"runtime"
 	"slices"
@@ -17,6 +19,7 @@ import (
 	tomlv2 "github.com/pelletier/go-toml/v2"
 	gitrepo "go.kenn.io/kit/git/repo"
 
+	"go.kenn.io/roborev/internal/agentname"
 	"go.kenn.io/roborev/internal/git"
 )
 
@@ -291,13 +294,16 @@ type Config struct {
 	// Advanced feature flags
 	Advanced AdvancedConfig `toml:"advanced"`
 
-	// ACP (Agent Client Protocol) configuration
-	ACP *ACPAgentConfig `toml:"acp"`
+	// ACP (Agent Client Protocol) configurations keyed by agent name
+	ACP ACPAgentConfigs `toml:"acp,omitempty"`
 }
 
-// ACPAgentConfig holds configuration for a single ACP agent
+// ACPAgentConfigs holds ACP configurations keyed by the <name> portion of the
+// canonical acp.<name> agent identity.
+type ACPAgentConfigs map[string]ACPAgentConfig
+
+// ACPAgentConfig holds configuration for a single ACP agent.
 type ACPAgentConfig struct {
-	Name            string   `toml:"name"`              // Agent name (required)
 	Command         string   `toml:"command"`           // ACP agent command (required)
 	Args            []string `toml:"args"`              // Additional arguments for the agent
 	ReadOnlyMode    string   `toml:"read_only_mode"`    // Read-only mode. Valid values depend on the underlying agent, e.g. "plan"
@@ -308,6 +314,116 @@ type ACPAgentConfig struct {
 	DisableModeNegotiation bool   `toml:"disable_mode_negotiation"`
 	Model                  string `toml:"model"`   // Default model to use
 	Timeout                int    `toml:"timeout"` // Command timeout in seconds (default: 600)
+}
+
+// ValidateACPAgentConfig validates one named ACP entry. Agent construction
+// calls the same function so loading and runtime selection cannot disagree.
+func ValidateACPAgentConfig(name string, cfg ACPAgentConfig) error {
+	rawName := name
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return fmt.Errorf("empty ACP agent name")
+	}
+	if name != rawName {
+		return fmt.Errorf("ACP agent name %q must not contain surrounding whitespace", rawName)
+	}
+	if strings.Contains(name, ".") {
+		return fmt.Errorf("ACP agent name %q must not contain dots", name)
+	}
+	if canonical, builtIn := agentname.BuiltIn(name); builtIn {
+		return fmt.Errorf("ACP agent name %q conflicts with built-in agent %q", name, canonical)
+	}
+	if strings.TrimSpace(cfg.Command) == "" {
+		return fmt.Errorf("ACP agent %q requires a command", name)
+	}
+	return nil
+}
+
+func validateACPAgentConfigs(configs ACPAgentConfigs) error {
+	for _, name := range slices.Sorted(maps.Keys(configs)) {
+		if err := ValidateACPAgentConfig(name, configs[name]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateAgentReferences(cfg any) error {
+	return walkAgentReferences(reflect.ValueOf(cfg), "")
+}
+
+func walkAgentReferences(value reflect.Value, path string) error {
+	if !value.IsValid() {
+		return nil
+	}
+	if value.Kind() == reflect.Pointer {
+		if value.IsNil() {
+			return nil
+		}
+		return walkAgentReferences(value.Elem(), path)
+	}
+	if value.Kind() != reflect.Struct {
+		return nil
+	}
+
+	typeOfValue := value.Type()
+	for i := range value.NumField() {
+		fieldType := typeOfValue.Field(i)
+		tag := strings.Split(fieldType.Tag.Get("toml"), ",")[0]
+		if tag == "" || tag == "-" {
+			continue
+		}
+		fieldPath := tag
+		if path != "" {
+			fieldPath = path + "." + tag
+		}
+		field := value.Field(i)
+
+		if field.Kind() == reflect.String &&
+			(tag == "agent" || strings.HasSuffix(tag, "_agent")) {
+			if err := agentname.ValidateReference(field.String()); err != nil {
+				return fmt.Errorf("%s: %w", fieldPath, err)
+			}
+			continue
+		}
+		if field.Kind() == reflect.Slice && tag == "agents" {
+			for j := range field.Len() {
+				if err := agentname.ValidateReference(field.Index(j).String()); err != nil {
+					return fmt.Errorf("%s[%d]: %w", fieldPath, j, err)
+				}
+			}
+			continue
+		}
+		if field.Kind() == reflect.Map {
+			keys := field.MapKeys()
+			slices.SortFunc(keys, func(a, b reflect.Value) int {
+				return strings.Compare(fmt.Sprint(a.Interface()), fmt.Sprint(b.Interface()))
+			})
+			for _, key := range keys {
+				entryPath := fmt.Sprintf("%s.%v", fieldPath, key.Interface())
+				if tag == "reviews" {
+					if err := agentname.ValidateReference(fmt.Sprint(key.Interface())); err != nil {
+						return fmt.Errorf("%s: %w", entryPath, err)
+					}
+				}
+				if err := walkAgentReferences(field.MapIndex(key), entryPath); err != nil {
+					return err
+				}
+			}
+			continue
+		}
+		if err := walkAgentReferences(field, fieldPath); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateConfig(cfg any, acp ACPAgentConfigs) error {
+	if err := validateACPAgentConfigs(acp); err != nil {
+		return err
+	}
+	return validateAgentReferences(cfg)
 }
 
 // RepoConfig holds per-repo overrides
@@ -446,8 +562,8 @@ type RepoConfig struct {
 	// Analysis settings
 	MaxPromptSize int `toml:"max_prompt_size" comment:"Maximum prompt size for this repo before falling back to file paths."` // Max prompt size in bytes before falling back to paths (overrides global default)
 
-	// ACP (Agent Client Protocol) configuration for this repo
-	ACP *ACPAgentConfig `toml:"acp"`
+	// ACP (Agent Client Protocol) configurations for this repo
+	ACP ACPAgentConfigs `toml:"acp,omitempty"`
 }
 
 const (
@@ -539,6 +655,9 @@ func LoadGlobalFrom(path string) (*Config, error) {
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		return cfg, nil
 	}
+	if err := rejectLegacyACPConfig(path); err != nil {
+		return nil, err
+	}
 
 	md, err := toml.DecodeFile(path, cfg)
 	if err != nil {
@@ -547,6 +666,9 @@ func LoadGlobalFrom(path string) (*Config, error) {
 
 	// Migrate deprecated config keys
 	cfg.migrateDeprecated(md)
+	if err := validateConfig(cfg, cfg.ACP); err != nil {
+		return nil, fmt.Errorf("config: %w", err)
+	}
 
 	if err := cfg.CI.NormalizeInstallations(); err != nil {
 		return nil, fmt.Errorf("config: %w", err)
@@ -649,13 +771,45 @@ func LoadRepoConfig(repoPath string) (*RepoConfig, error) {
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		return nil, nil // No repo config
 	}
+	if err := rejectLegacyACPConfig(path); err != nil {
+		return nil, err
+	}
 
 	var cfg RepoConfig
 	if _, err := toml.DecodeFile(path, &cfg); err != nil {
 		return nil, err
 	}
+	if err := validateConfig(&cfg, cfg.ACP); err != nil {
+		return nil, fmt.Errorf("config: %w", err)
+	}
 
 	return &cfg, nil
+}
+
+func rejectLegacyACPConfig(path string) error {
+	raw := make(map[string]any)
+	if _, err := toml.DecodeFile(path, &raw); err != nil {
+		return err
+	}
+	acp, ok := raw["acp"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	for _, value := range acp {
+		if _, namedTable := value.(map[string]any); namedTable {
+			continue
+		}
+		name, _ := acp["name"].(string)
+		name = strings.TrimSpace(name)
+		if name == "" {
+			name = "<name>"
+		}
+		return fmt.Errorf(
+			"legacy [acp] configuration is no longer supported; move it to [acp.%s] and remove the name field",
+			name,
+		)
+	}
+	return nil
 }
 
 // ValidateRepoConfig returns any repo-config load or parse error for repoPath.
@@ -749,6 +903,9 @@ func LoadRepoConfigFromRef(repoPath, ref string) (*RepoConfig, error) {
 
 	var cfg RepoConfig
 	if _, err := toml.Decode(string(data), &cfg); err != nil {
+		return nil, &ConfigParseError{Ref: ref, Err: err}
+	}
+	if err := validateConfig(&cfg, cfg.ACP); err != nil {
 		return nil, &ConfigParseError{Ref: ref, Err: err}
 	}
 	return &cfg, nil
@@ -924,6 +1081,9 @@ func loadRepoConfigFile(path string) (*RepoConfig, error) {
 	var cfg RepoConfig
 	if _, err := toml.DecodeFile(path, &cfg); err != nil {
 		return nil, err
+	}
+	if err := validateConfig(&cfg, cfg.ACP); err != nil {
+		return nil, fmt.Errorf("config: %w", err)
 	}
 	return &cfg, nil
 }
@@ -1257,45 +1417,76 @@ func ResolveSnapshotDir(repoPath string) (string, error) {
 	return filepath.Join(repoPath, clean), nil
 }
 
-// ResolveACPAgentConfig returns the effective ACP agent configuration for a repo.
-// Priority: repo [acp] config > global [acp] config > nil (no ACP config).
-// Repo-level ACP config completely overrides global ACP config (no merging of individual fields).
-func ResolveACPAgentConfig(repoPath string, globalCfg *Config) *ACPAgentConfig {
-	// Only try repo config if repoPath is non-empty
+// ResolveACPAgentConfig returns the named ACP configuration effective for a
+// repository. A repository entry replaces the complete same-name global entry.
+func ResolveACPAgentConfig(name, repoPath string, globalCfg *Config) (ACPAgentConfig, bool) {
+	var repoCfg *RepoConfig
 	if repoPath != "" {
-		repoCfg, err := LoadRepoConfig(repoPath)
-		if err != nil {
-			// Malformed repo config - fall through to global
-			if IsConfigParseError(err) {
-				// Parse error - skip repo config
-			} else {
-				repoCfg = nil
-			}
-		}
-		if repoCfg != nil && repoCfg.ACP != nil {
-			return repoCfg.ACP
+		loaded, err := LoadRepoConfig(repoPath)
+		if err == nil {
+			repoCfg = loaded
 		}
 	}
-
-	// Fall back to global config
-	if globalCfg != nil && globalCfg.ACP != nil {
-		return globalCfg.ACP
-	}
-
-	return nil
+	return ResolveACPAgentConfigFromConfig(name, repoCfg, globalCfg)
 }
 
 // ResolveACPAgentConfigFromConfig is the config-taking core of
-// ResolveACPAgentConfig. Repo-level ACP config completely overrides global ACP
-// config when present.
-func ResolveACPAgentConfigFromConfig(repoCfg *RepoConfig, globalCfg *Config) *ACPAgentConfig {
-	if repoCfg != nil && repoCfg.ACP != nil {
-		return repoCfg.ACP
+// ResolveACPAgentConfig. It never reads repository configuration from disk.
+func ResolveACPAgentConfigFromConfig(
+	name string,
+	repoCfg *RepoConfig,
+	globalCfg *Config,
+) (ACPAgentConfig, bool) {
+	name = strings.TrimSpace(name)
+	if configName, ok := agentname.ACPConfigName(name); ok {
+		name = configName
 	}
-	if globalCfg != nil && globalCfg.ACP != nil {
-		return globalCfg.ACP
+	if name == "" {
+		return ACPAgentConfig{}, false
 	}
-	return nil
+	if repoCfg != nil {
+		if cfg, ok := repoCfg.ACP[name]; ok {
+			return cloneACPAgentConfig(cfg), true
+		}
+	}
+	if globalCfg != nil {
+		cfg, ok := globalCfg.ACP[name]
+		return cloneACPAgentConfig(cfg), ok
+	}
+	return ACPAgentConfig{}, false
+}
+
+// ResolveACPAgentConfigsFromConfig returns every effective named ACP
+// configuration. Repository entries replace complete same-name global entries;
+// unrelated global entries remain available. The returned map is independent
+// of both source configurations.
+func ResolveACPAgentConfigsFromConfig(
+	repoCfg *RepoConfig,
+	globalCfg *Config,
+) ACPAgentConfigs {
+	var resolved ACPAgentConfigs
+	if globalCfg != nil && len(globalCfg.ACP) > 0 {
+		resolved = make(ACPAgentConfigs, len(globalCfg.ACP))
+		maps.Copy(resolved, globalCfg.ACP)
+		for name, cfg := range resolved {
+			resolved[name] = cloneACPAgentConfig(cfg)
+		}
+	}
+	if repoCfg != nil && len(repoCfg.ACP) > 0 {
+		if resolved == nil {
+			resolved = make(ACPAgentConfigs, len(repoCfg.ACP))
+		}
+		maps.Copy(resolved, repoCfg.ACP)
+		for name, cfg := range repoCfg.ACP {
+			resolved[name] = cloneACPAgentConfig(cfg)
+		}
+	}
+	return resolved
+}
+
+func cloneACPAgentConfig(cfg ACPAgentConfig) ACPAgentConfig {
+	cfg.Args = slices.Clone(cfg.Args)
+	return cfg
 }
 
 // SaveGlobal saves the global configuration
@@ -1305,6 +1496,9 @@ func SaveGlobal(cfg *Config) error {
 
 // SaveGlobalTo saves the global configuration to a specific path.
 func SaveGlobalTo(path string, cfg *Config) error {
+	if err := validateConfig(cfg, cfg.ACP); err != nil {
+		return fmt.Errorf("config: %w", err)
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
@@ -1355,6 +1549,9 @@ const defaultHooksExample = `
 // appending a commented [[hooks]] example. It writes atomically (temp file +
 // rename) with 0600 permissions. Use SaveGlobalTo for subsequent rewrites.
 func WriteDefaultGlobalConfigTo(path string, cfg *Config) error {
+	if err := validateConfig(cfg, cfg.ACP); err != nil {
+		return fmt.Errorf("config: %w", err)
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
@@ -1393,6 +1590,9 @@ func SaveRepoConfigTo(path string, cfg *RepoConfig) error {
 // SaveRepoConfigToWithExplicitKeys saves a per-repo configuration while
 // preserving explicit zero-valued keys named in explicitKeys.
 func SaveRepoConfigToWithExplicitKeys(path string, cfg *RepoConfig, explicitKeys ...string) error {
+	if err := validateConfig(cfg, cfg.ACP); err != nil {
+		return fmt.Errorf("config: %w", err)
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}

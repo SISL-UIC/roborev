@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -2078,7 +2079,7 @@ func TestResolveBackupPrefersStoredJobBackup(t *testing.T) {
 // default_backup_model inherited by a workflow-selected ACP backup agent
 // pairs with default_backup_agent (unset here), so persisting it would hand
 // the ACP agent a model it never advertised and the failover attempt would
-// fail again. The guard surfaces [acp].model instead. Non-ACP backups keep
+// fail again. The guard surfaces [acp.<name>].model instead. Non-ACP backups keep
 // legacy inheritance.
 func TestResolveBackupModelSkipsMispairedACPInheritedDefault(t *testing.T) {
 	assert := assert.New(t)
@@ -2086,10 +2087,10 @@ func TestResolveBackupModelSkipsMispairedACPInheritedDefault(t *testing.T) {
 	job := &storage.ReviewJob{Agent: "codex", RepoPath: repoPath}
 
 	// Mispaired: ACP backup agent from review_backup_agent, model inherited
-	// from default_backup_model -> [acp].model wins.
+	// from default_backup_model -> [acp.<name>].model wins.
 	cfg := config.DefaultConfig()
-	cfg.ACP = &config.ACPAgentConfig{Name: "agy-acp", Model: "gemini-3.5-flash"}
-	cfg.ReviewBackupAgent = "agy-acp"
+	cfg.ACP = config.ACPAgentConfigs{"agy-acp": {Model: "gemini-3.5-flash"}}
+	cfg.ReviewBackupAgent = "acp.agy-acp"
 	cfg.DefaultBackupModel = "gpt-5.4-mini"
 	pool := NewWorkerPool(nil, NewStaticConfig(cfg), 1, NewBroadcaster(), nil, nil)
 	assert.Equal("gemini-3.5-flash", pool.resolveBackupModel(job))
@@ -2097,8 +2098,8 @@ func TestResolveBackupModelSkipsMispairedACPInheritedDefault(t *testing.T) {
 	// Same-layer pair: default_backup_agent IS the ACP agent, so the
 	// default_backup_model configured alongside it is honored.
 	cfgPaired := config.DefaultConfig()
-	cfgPaired.ACP = &config.ACPAgentConfig{Name: "agy-acp", Model: "gemini-3.5-flash"}
-	cfgPaired.DefaultBackupAgent = "agy-acp"
+	cfgPaired.ACP = config.ACPAgentConfigs{"agy-acp": {Model: "gemini-3.5-flash"}}
+	cfgPaired.DefaultBackupAgent = "acp.agy-acp"
 	cfgPaired.DefaultBackupModel = "gemini-3.0-pro"
 	poolPaired := NewWorkerPool(nil, NewStaticConfig(cfgPaired), 1, NewBroadcaster(), nil, nil)
 	assert.Equal("gemini-3.0-pro", poolPaired.resolveBackupModel(job))
@@ -2118,11 +2119,11 @@ func TestResolveBackupModelSkipsMispairedACPInheritedDefault(t *testing.T) {
 	repoOverridePath := t.TempDir()
 	require.NoError(t, os.WriteFile(
 		filepath.Join(repoOverridePath, ".roborev.toml"),
-		[]byte("review_backup_agent = \"agy-acp\"\n"),
+		[]byte("review_backup_agent = \"acp.agy-acp\"\n"),
 		0o644,
 	))
 	cfgCross := config.DefaultConfig()
-	cfgCross.ACP = &config.ACPAgentConfig{Name: "agy-acp", Model: "gemini-3.5-flash"}
+	cfgCross.ACP = config.ACPAgentConfigs{"agy-acp": {Model: "gemini-3.5-flash"}}
 	cfgCross.ReviewBackupModel = "gpt-5.4"
 	poolCross := NewWorkerPool(nil, NewStaticConfig(cfgCross), 1, NewBroadcaster(), nil, nil)
 	crossJob := &storage.ReviewJob{Agent: "codex", RepoPath: repoOverridePath}
@@ -2200,12 +2201,116 @@ func TestResolveBackupAgentUsesConfiguredACPName(t *testing.T) {
 	t.Setenv("PATH", fakeBin)
 
 	cfg := config.DefaultConfig()
-	cfg.ReviewBackupAgent = "my-acp"
-	cfg.ACP = &config.ACPAgentConfig{Name: "my-acp", Command: acpPath}
+	cfg.ReviewBackupAgent = "acp.my-acp"
+	cfg.ACP = config.ACPAgentConfigs{"my-acp": {Command: acpPath}}
 	pool := NewWorkerPool(nil, NewStaticConfig(cfg), 1, NewBroadcaster(), nil, nil)
 	job := &storage.ReviewJob{Agent: "codex", RepoPath: t.TempDir()}
 
-	assert.Equal(t, "acp", pool.resolveBackupAgent(job))
+	assert.Equal(t, "acp.my-acp", pool.resolveBackupAgent(job))
+}
+
+func TestResolveReviewJobAgentUsesCISnapshottedACPConfig(t *testing.T) {
+	binDir := t.TempDir()
+	frozenCommand := filepath.Join(binDir, "frozen-goose")
+	liveCommand := filepath.Join(binDir, "live-goose")
+	if runtime.GOOS == "windows" {
+		frozenCommand += ".cmd"
+		liveCommand += ".cmd"
+	}
+	script := []byte("#!/bin/sh\nexit 0\n")
+	require.NoError(t, os.WriteFile(frozenCommand, script, 0o755))
+	require.NoError(t, os.WriteFile(liveCommand, script, 0o755))
+
+	repoPath := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(repoPath, ".roborev.toml"),
+		fmt.Appendf(nil, "[acp.goose]\ncommand = %q\n", liveCommand), 0o644))
+	snapshot, err := json.Marshal(struct {
+		ACP config.ACPAgentConfigs `json:"acp"`
+	}{ACP: config.ACPAgentConfigs{"goose": {Command: frozenCommand}}})
+	require.NoError(t, err)
+	job := &storage.ReviewJob{
+		Source: storage.JobSourceCI, RepoPath: repoPath, Agent: "acp.goose",
+		PanelMemberConfigJSON: string(snapshot),
+	}
+
+	configured, err := resolveReviewJobAgent(job, config.DefaultConfig())
+	require.NoError(t, err)
+	configuredACP, ok := configured.(*agent.ACPAgent)
+	require.True(t, ok)
+	assert.Equal(t, "acp.goose", configuredACP.Name())
+	assert.Equal(t, frozenCommand, configuredACP.CommandName())
+}
+
+func TestResolveReviewJobAgentLegacyCIUsesWorkingTreeACPConfig(t *testing.T) {
+	binDir := t.TempDir()
+	liveCommand := filepath.Join(binDir, "live-goose")
+	if runtime.GOOS == "windows" {
+		liveCommand += ".cmd"
+	}
+	require.NoError(t, os.WriteFile(liveCommand, []byte("#!/bin/sh\nexit 0\n"), 0o755))
+
+	repoPath := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(repoPath, ".roborev.toml"),
+		fmt.Appendf(nil, "[acp.goose]\ncommand = %q\n", liveCommand), 0o644))
+	job := &storage.ReviewJob{
+		Source: storage.JobSourceCI, RepoPath: repoPath, Agent: "acp.goose",
+		PanelMemberConfigJSON: `{"name":"legacy-member"}`,
+	}
+
+	configured, err := resolveReviewJobAgent(job, config.DefaultConfig())
+	require.NoError(t, err)
+	configuredACP, ok := configured.(*agent.ACPAgent)
+	require.True(t, ok)
+	assert.Equal(t, liveCommand, configuredACP.CommandName())
+}
+
+func TestCIMemberFailoverUsesSnapshottedACPBackup(t *testing.T) {
+	tc := newWorkerTestContext(t, 1)
+	binDir := t.TempDir()
+	frozenCommand := filepath.Join(binDir, "frozen-backup-goose")
+	liveCommand := filepath.Join(binDir, "live-backup-goose")
+	if runtime.GOOS == "windows" {
+		frozenCommand += ".cmd"
+		liveCommand += ".cmd"
+	}
+	script := []byte("#!/bin/sh\nexit 0\n")
+	require.NoError(t, os.WriteFile(frozenCommand, script, 0o755))
+	require.NoError(t, os.WriteFile(liveCommand, script, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(tc.TmpDir, ".roborev.toml"),
+		fmt.Appendf(nil, "[acp.goose]\ncommand = %q\n", liveCommand), 0o644))
+	snapshot, err := json.Marshal(ciPanelMemberConfig{
+		ResolvedMember: config.ResolvedMember{
+			Agent: "test", BackupAgent: "acp.goose", BackupModel: "backup-model",
+		},
+		ACP: config.ACPAgentConfigs{"goose": {Command: frozenCommand}},
+	})
+	require.NoError(t, err)
+	job, err := tc.DB.EnqueueJob(storage.EnqueueOpts{
+		RepoID: tc.Repo.ID, GitRef: testutil.GetHeadSHA(t, tc.TmpDir),
+		Agent: "test", Model: "primary-model", Source: storage.JobSourceCI,
+		BackupAgent: "acp.goose", BackupModel: "backup-model",
+		PanelMemberConfigJSON: string(snapshot),
+	})
+	require.NoError(t, err)
+	claimed, err := tc.DB.ClaimJob(testWorkerID)
+	require.NoError(t, err)
+	require.Equal(t, job.ID, claimed.ID)
+
+	failedOver, err := tc.DB.FailoverJob(
+		job.ID, testWorkerID, "acp.goose", "backup-model",
+	)
+	require.NoError(t, err)
+	require.True(t, failedOver)
+	failedOverJob, err := tc.DB.GetJobByID(job.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "acp.goose", failedOverJob.Agent)
+	assert.Equal(t, "backup-model", failedOverJob.Model)
+
+	configured, err := resolveReviewJobAgent(failedOverJob, config.DefaultConfig())
+	require.NoError(t, err)
+	configuredACP, ok := configured.(*agent.ACPAgent)
+	require.True(t, ok)
+	assert.Equal(t, frozenCommand, configuredACP.CommandName())
 }
 
 func TestFailOrRetryInner_QuotaSkipsRetries(t *testing.T) {
