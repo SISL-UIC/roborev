@@ -27,13 +27,14 @@ your agentic loop while context is fresh.
 ![How roborev works](https://roborev.io/assets/static/how-it-works.svg)
 
 - **Post-commit reviews** - a git hook reviews every commit in the background (any agent).
-- **Agent hook** - watches your Claude Code / Codex session and tells the agent to run the roborev-fix skill when findings pile up.
+- **Agent hook** - watches supported coding-agent sessions and brings open
+  roborev findings back into the active workflow.
 
 ```bash
 roborev init                  # layer 1: per-commit reviews
 roborev skills install
-roborev agent-hook install    # layer 2: mid-session fix loop (Codex/Claude)
-roborev agent-hook install --agent droid  # layer 2: mid-session fix loop (Factory Droid)
+roborev agent-hook install    # layer 2: auto-detect and wire installed agents
+roborev agent-hook install --agent all  # or wire every supported profile
 ```
 
 Before you ship, run the `/roborev-refine` skill: it re-reviews and fixes your
@@ -53,9 +54,8 @@ roborev tui           # View reviews in interactive UI
 If roborev is managed by a version manager, `roborev init` and
 `roborev agent-hook install` try to install hooks with the stable shim/symlink.
 You can also choose the exact binary path with
-`roborev init --binary ~/.local/share/mise/shims/roborev`,
-`roborev agent-hook install --binary ~/.local/share/mise/shims/roborev`, or
-`roborev agent-hook install --agent droid --binary ~/.local/share/mise/shims/roborev`.
+`roborev init --binary ~/.local/share/mise/shims/roborev`, or
+`roborev agent-hook install --binary ~/.local/share/mise/shims/roborev`.
 
 ![roborev review](https://roborev.io/assets/generated/tui-review.svg)
 
@@ -65,9 +65,9 @@ You can also choose the exact binary path with
   git hooks. No remote review workflow required.
 - **Auto-Fix** - `roborev fix` feeds review findings to an agent that
   applies fixes and commits. `roborev refine` iterates until reviews pass.
-- **Agent Hook** - Optional Codex, Claude Code, and Factory Droid harness hooks
-  can prompt active sessions to run the fix skill when roborev has open failed
-  reviews.
+- **Agent Hook** - Optional hooks for Claude Code, Codex, Copilot CLI, Cursor,
+  Factory Droid, Gemini CLI, Hermes, and Qwen bring open findings back into the
+  active agent session.
 - **Code Analysis** - Built-in analysis types (duplication, complexity,
   refactoring, test fixtures, dead code, security) that agents can fix
   automatically.
@@ -95,10 +95,12 @@ command line non-interactively with `roborev fix`.
 changes and commits. The new commit gets reviewed automatically,
 closing the loop.
 
-For Codex, Claude Code, and Factory Droid sessions, `roborev agent-hook install`
-can add an optional harness hook that prompts the active session to invoke
-`$roborev-fix` (or `/roborev-fix` for Droid) after configured turn, commit, or
-failed-review thresholds are met.
+`roborev agent-hook install` auto-detects installed Claude Code, Codex, Copilot
+CLI, Cursor, Factory Droid, Gemini CLI, Hermes, and Qwen harnesses and adds
+optional hooks after configured turn, commit, or failed-review thresholds are
+met. Reminders include a complete CLI fallback when no roborev skill is
+installed. Hermes delivers queued post-tool reminders at `Stop`; Cursor records
+the same events but emits no control response.
 The hook uses a separate local `roborev-agent-hook` daemon for session counters;
 it does not run inside the main roborev daemon.
 
@@ -195,8 +197,8 @@ leaving Markdown tables unchanged. Use `make check-renovate-config` to validate
 | `roborev fix` | Fix open reviews (or specify job IDs) |
 | `roborev refine` | Auto-fix loop: fix, re-review, repeat |
 | `roborev analyze <type>` | Run code analysis with optional auto-fix |
-| `roborev agent-hook install` | Install optional Codex/Claude agent harness hooks |
-| `roborev agent-hook install --agent droid` | Install optional Factory Droid harness hooks |
+| `roborev agent-hook install` | Install hooks for detected coding agents |
+| `roborev agent-hook install --agent all` | Install all eight kit-backed profiles |
 | `roborev compact` | Verify and consolidate open review findings |
 | `roborev show [sha]` | Display review for commit |
 | `roborev export reviews` | Export completed reviews as JSON |

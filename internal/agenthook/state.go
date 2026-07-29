@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 	"unicode"
@@ -129,6 +130,24 @@ func (s *StateStore) Record(req Request) (Response, error) {
 }
 
 func (s *StateStore) recordStop(req Request) (Response, error) {
+	if req.Event.StopHookActive {
+		s.mu.Lock()
+		st := s.sessions[req.Event.SessionID]
+		s.mu.Unlock()
+		return Response{
+			SessionID:             req.Event.SessionID,
+			Count:                 st.Count,
+			Threshold:             req.Threshold,
+			FailedReviewCount:     st.FailedReviewCount,
+			FailedReviewThreshold: req.FailedReviewThreshold,
+			ReminderPromptCount:   st.ReminderPromptCount,
+			Skipped:               true,
+		}, nil
+	}
+	if resp, delivered, err := s.deliverPendingReminder(req); err != nil || delivered {
+		return resp, err
+	}
+
 	scope, ok := resolveHookScope(context.Background(), req.Event.CWD, req.RoborevServerAddr)
 	if !ok {
 		return Response{
@@ -155,17 +174,6 @@ func (s *StateStore) recordStop(req Request) (Response, error) {
 
 	st := s.sessions[req.Event.SessionID]
 	lineageKey := ensureLineageKey(&st, scope)
-	if req.Event.StopHookActive {
-		return Response{
-			SessionID:             req.Event.SessionID,
-			Count:                 st.Count,
-			Threshold:             req.Threshold,
-			FailedReviewCount:     st.FailedReviewCount,
-			FailedReviewThreshold: req.FailedReviewThreshold,
-			ReminderPromptCount:   st.ReminderPromptCount,
-			Skipped:               true,
-		}, nil
-	}
 
 	now := time.Now().UTC()
 	st.Count++
@@ -182,11 +190,14 @@ func (s *StateStore) recordStop(req Request) (Response, error) {
 	}
 	failedReviewTriggered := applyFailedReviewTrigger(
 		req, &st, scope.TrackedRepoRoot, scope.Branch, lineageKey,
-		failedReviewCount, haveFailedReviewCount, now,
+		failedReviewCount, haveFailedReviewCount,
 	)
 	promptTriggered := stopTriggered || failedReviewTriggered
 	if promptTriggered {
 		st.ReminderPromptCount++
+		if failedReviewTriggered {
+			st.FailedReviewTriggeredAt = now
+		}
 		resetPromptCountersForKeys(&st, promptResetKeys(scope, lineageKey))
 	}
 	s.sessions[req.Event.SessionID] = st
@@ -391,16 +402,47 @@ func (s *StateStore) recordPostToolUse(req Request) (Response, error) {
 	// Capture this checkout's count before resetPromptCounters clears it, so the
 	// reminder text reports the triggering repo's commits, not session-wide totals.
 	triggeringCommitCount := commitCountSincePrompt
-	if commitTriggered {
+	if commitTriggered && !req.DeferPostToolReminder {
 		st.CommitTriggeredAt = now
 	}
 	failedReviewTriggered := applyFailedReviewTrigger(
 		req, &st, scope.TrackedRepoRoot, scope.Branch, lineageKey,
-		failedReviewCount, haveFailedReviewCount, now,
+		failedReviewCount, haveFailedReviewCount,
 	)
 	promptTriggered := commitTriggered || failedReviewTriggered
-	if promptTriggered {
+	if promptTriggered && req.DeferPostToolReminder {
+		if failedReviewTriggered {
+			queuePendingReminder(&st, PendingReminder{
+				TriggeredBy:       "failed_reviews",
+				Reason:            deferredReminderReason(buildFailedReviewReason(req, st), scope.WorktreeRoot),
+				TrackedRepoRoot:   scope.TrackedRepoRoot,
+				WorktreeRoot:      scope.WorktreeRoot,
+				Branch:            scope.Branch,
+				Head:              scope.Head,
+				LineageKey:        lineageKey,
+				FailedReviewCount: failedReviewCount,
+				CreatedAt:         now,
+			})
+		}
+		if commitTriggered {
+			queuePendingReminder(&st, PendingReminder{
+				TriggeredBy:     "commit",
+				Reason:          deferredReminderReason(buildCommitReason(req, triggeringCommitCount, scope.WorktreeRoot), scope.WorktreeRoot),
+				TrackedRepoRoot: scope.TrackedRepoRoot,
+				WorktreeRoot:    scope.WorktreeRoot,
+				Branch:          scope.Branch,
+				Head:            scope.Head,
+				LineageKey:      lineageKey,
+				CommitCount:     triggeringCommitCount,
+				CreatedAt:       now,
+			})
+		}
+		resetPromptCountersForKeys(&st, promptResetKeys(scope, lineageKey))
+	} else if promptTriggered {
 		st.ReminderPromptCount++
+		if failedReviewTriggered {
+			st.FailedReviewTriggeredAt = now
+		}
 		resetPromptCountersForKeys(&st, promptResetKeys(scope, lineageKey))
 	}
 	s.sessions[req.Event.SessionID] = st
@@ -417,7 +459,10 @@ func (s *StateStore) recordPostToolUse(req Request) (Response, error) {
 		FailedReviewCount:     st.FailedReviewCount,
 		FailedReviewThreshold: req.FailedReviewThreshold,
 		ReminderPromptCount:   st.ReminderPromptCount,
-		Triggered:             promptTriggered,
+		Triggered:             promptTriggered && !req.DeferPostToolReminder,
+	}
+	if req.DeferPostToolReminder {
+		return resp, nil
 	}
 	switch {
 	case failedReviewTriggered:
@@ -430,6 +475,141 @@ func (s *StateStore) recordPostToolUse(req Request) (Response, error) {
 	return resp, nil
 }
 
+func pendingReminderKey(reminder PendingReminder) string {
+	return reminder.LineageKey + "\x00" + reminder.TriggeredBy
+}
+
+func queuePendingReminder(st *SessionState, reminder PendingReminder) {
+	if st.PendingReminders == nil {
+		st.PendingReminders = map[string]PendingReminder{}
+	}
+	key := pendingReminderKey(reminder)
+	if existing, ok := st.PendingReminders[key]; ok {
+		reminder.CreatedAt = existing.CreatedAt
+		reminder.CommitCount += existing.CommitCount
+		reminder.FailedReviewCount += existing.FailedReviewCount
+	}
+	st.PendingReminders[key] = reminder
+}
+
+func deferredReminderReason(reason, worktree string) string {
+	return fmt.Sprintf(
+		"%s The triggering worktree is %q; change to it before running roborev commands.",
+		strings.TrimSpace(reason), filepath.Clean(worktree),
+	)
+}
+
+type pendingReminderCandidate struct {
+	key      string
+	reminder PendingReminder
+}
+
+func (s *StateStore) deliverPendingReminder(req Request) (Response, bool, error) {
+	s.mu.Lock()
+	st := s.sessions[req.Event.SessionID]
+	candidates := make([]pendingReminderCandidate, 0, len(st.PendingReminders))
+	for key, reminder := range st.PendingReminders {
+		candidates = append(candidates, pendingReminderCandidate{key: key, reminder: reminder})
+	}
+	s.mu.Unlock()
+	if len(candidates) == 0 {
+		return Response{}, false, nil
+	}
+
+	sort.Slice(candidates, func(i, j int) bool {
+		left, right := candidates[i], candidates[j]
+		leftPriority := pendingReminderPriority(left.reminder.TriggeredBy)
+		rightPriority := pendingReminderPriority(right.reminder.TriggeredBy)
+		if leftPriority != rightPriority {
+			return leftPriority < rightPriority
+		}
+		if !left.reminder.CreatedAt.Equal(right.reminder.CreatedAt) {
+			return left.reminder.CreatedAt.Before(right.reminder.CreatedAt)
+		}
+		return left.key < right.key
+	})
+
+	for _, candidate := range candidates {
+		pending := candidate.reminder
+		if pending.TriggeredBy == "failed_reviews" {
+			count, ok := countOpenFailedReviews(
+				context.Background(), pending.TrackedRepoRoot, pending.Branch,
+				pending.Head, req.RoborevServerAddr,
+			)
+			if !ok {
+				return Response{SessionID: req.Event.SessionID, Skipped: true}, true, nil
+			}
+			if count == 0 {
+				if err := s.removePendingReminder(req.Event.SessionID, candidate); err != nil {
+					return Response{}, false, err
+				}
+				continue
+			}
+			pending.FailedReviewCount = count
+		}
+
+		s.mu.Lock()
+		st = s.sessions[req.Event.SessionID]
+		current, ok := st.PendingReminders[candidate.key]
+		if !ok || current != candidate.reminder {
+			s.mu.Unlock()
+			continue
+		}
+		delete(st.PendingReminders, candidate.key)
+		st.ReminderPromptCount++
+		now := time.Now().UTC()
+		switch pending.TriggeredBy {
+		case "failed_reviews":
+			st.FailedReviewTriggeredAt = now
+		case "commit":
+			st.CommitTriggeredAt = now
+		}
+		s.sessions[req.Event.SessionID] = st
+		err := s.saveLocked()
+		s.mu.Unlock()
+		if err != nil {
+			return Response{}, false, err
+		}
+		return Response{
+			SessionID:             req.Event.SessionID,
+			Count:                 st.Count,
+			Threshold:             req.Threshold,
+			CommitCount:           pending.CommitCount,
+			CommitThreshold:       req.CommitThreshold,
+			FailedReviewCount:     pending.FailedReviewCount,
+			FailedReviewThreshold: req.FailedReviewThreshold,
+			ReminderPromptCount:   st.ReminderPromptCount,
+			Triggered:             true,
+			TriggeredBy:           pending.TriggeredBy,
+			Reason:                pending.Reason,
+		}, true, nil
+	}
+	return Response{}, false, nil
+}
+
+func (s *StateStore) removePendingReminder(
+	sessionID string,
+	candidate pendingReminderCandidate,
+) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st := s.sessions[sessionID]
+	current, ok := st.PendingReminders[candidate.key]
+	if !ok || current != candidate.reminder {
+		return nil
+	}
+	delete(st.PendingReminders, candidate.key)
+	s.sessions[sessionID] = st
+	return s.saveLocked()
+}
+
+func pendingReminderPriority(triggeredBy string) int {
+	if triggeredBy == "failed_reviews" {
+		return 0
+	}
+	return 1
+}
+
 func hasActionableFailedReviews(count int, ok bool) bool {
 	return ok && count > 0
 }
@@ -439,7 +619,7 @@ func thresholdReady(countSincePrompt, threshold int) bool {
 }
 
 func isShellCommandTool(toolName string) bool {
-	return toolName == "" || toolName == "Bash" || toolName == ExecuteMatcher
+	return toolName == "" || toolName == "Bash"
 }
 
 // resetPromptCounters restarts the per-prompt counters after a reminder fires.
@@ -590,7 +770,7 @@ func uniqueStrings(values []string) []string {
 }
 
 func applyFailedReviewTrigger(
-	req Request, st *SessionState, repoRoot, branch, lineageKey string, count int, ok bool, now time.Time,
+	req Request, st *SessionState, repoRoot, branch, lineageKey string, count int, ok bool,
 ) bool {
 	if !ok || req.FailedReviewThreshold <= 0 {
 		return false
@@ -616,7 +796,6 @@ func applyFailedReviewTrigger(
 		st.FailedReviewTriggeredCounts = map[string]int{}
 	}
 	st.FailedReviewTriggeredCounts[key] = count
-	st.FailedReviewTriggeredAt = now
 	return true
 }
 

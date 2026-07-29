@@ -8,6 +8,8 @@ import (
 	"strings"
 	"time"
 
+	kitagenthook "go.kenn.io/kit/agenthook"
+
 	"go.kenn.io/roborev/internal/agenthook"
 	"go.kenn.io/roborev/internal/config"
 	"go.kenn.io/roborev/internal/githook"
@@ -51,6 +53,8 @@ func detectState(ctx context.Context, repoRoot string, inGitRepo bool) quickstar
 	daemonUp := daemonReachable()
 	global, _ := config.LoadGlobal()
 	agent := resolveQuickstartReviewAgent(repoRoot, global)
+	claudePath, _ := kitagenthook.ConfigPath(kitagenthook.AgentClaude)
+	codexPath, _ := kitagenthook.ConfigPath(kitagenthook.AgentCodex)
 
 	checks := []quickstartCheck{
 		checkDaemon(daemonUp),
@@ -58,9 +62,9 @@ func detectState(ctx context.Context, repoRoot string, inGitRepo bool) quickstar
 		checkRepoRegistered(repoRoot, inGitRepo, daemonUp),
 		checkRepoConfig(repoRoot, inGitRepo, agent),
 		checkConfiguredAgent(repoRoot, inGitRepo, agent),
-		checkAgentHook("agent_hook_claude", agenthook.DefaultClaudeSettingsPath(),
+		checkAgentHook("agent_hook_claude", kitagenthook.AgentClaude, claudePath,
 			"roborev agent-hook install --agent claude"),
-		checkAgentHook("agent_hook_codex", agenthook.DefaultCodexHooksPath(),
+		checkAgentHook("agent_hook_codex", kitagenthook.AgentCodex, codexPath,
 			"roborev agent-hook install --agent codex"),
 		checkSkills(),
 	}
@@ -213,9 +217,9 @@ func checkConfiguredAgent(repoRoot string, inGitRepo bool, agent string) quickst
 	return c
 }
 
-func checkAgentHook(id, path, fix string) quickstartCheck {
+func checkAgentHook(id string, agent kitagenthook.Agent, path, fix string) quickstartCheck {
 	c := quickstartCheck{ID: id}
-	installed, err := agenthook.Installed(path)
+	installed, err := agenthook.Installed(agent, path)
 	if err != nil {
 		c.Status = statusUnknown
 		c.Details = fmt.Sprintf("could not read %s: %v", path, err)

@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"strings"
 
+	kitagenthook "go.kenn.io/kit/agenthook"
+
 	"go.kenn.io/roborev/internal/config"
 )
 
@@ -13,8 +15,7 @@ const (
 	DefaultTurnThreshold         = 5
 	DefaultCommitThreshold       = 0
 	DefaultFailedReviewThreshold = 4
-	DefaultInstruction           = "Invoke the $roborev-fix skill now."
-	DefaultDroidInstruction      = "Run the roborev-fix skill to address the unresolved roborev findings, then continue."
+	DefaultInstruction           = config.DefaultAgentHookInstruction
 
 	TurnThresholdEnv         = "ROBOREV_AGENT_HOOK_TURN_THRESHOLD"
 	CommitThresholdEnv       = "ROBOREV_AGENT_HOOK_COMMIT_THRESHOLD"
@@ -55,14 +56,17 @@ func ResolveOptions(cli Options, changed map[string]bool) (Options, error) {
 
 func ResolveOptionsForAgent(agent string, cli Options, changed map[string]bool) (Options, error) {
 	agent = strings.ToLower(strings.TrimSpace(agent))
-	switch agent {
-	case "", "agent", "codex", "claude":
+	if agent == "" {
 		return resolveAgentOptions(cli, changed)
-	case "droid":
-		return resolveDroidOptions(cli, changed)
-	default:
-		return Options{}, fmt.Errorf("agent must be codex, claude, droid, or empty")
 	}
+	profile, err := kitagenthook.ParseAgent(agent)
+	if err != nil {
+		return Options{}, err
+	}
+	if profile == kitagenthook.AgentDroid {
+		return resolveDroidOptions(cli, changed)
+	}
+	return resolveAgentOptions(cli, changed)
 }
 
 func resolveAgentOptions(cli Options, changed map[string]bool) (Options, error) {
@@ -103,7 +107,6 @@ func resolveAgentOptions(cli Options, changed map[string]bool) (Options, error) 
 
 func resolveDroidOptions(cli Options, changed map[string]bool) (Options, error) {
 	opts := DefaultOptions()
-	opts.Instruction = DefaultDroidInstruction
 	if changed["config"] {
 		opts.ConfigPath = cli.ConfigPath
 	}
