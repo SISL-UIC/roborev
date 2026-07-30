@@ -936,7 +936,9 @@ command = "`+touchCmd(repoMarker)+`"
 		Error: "fail",
 	})
 
-	waitForFiles(t, 5*time.Second, globalMarker, repoMarker)
+	// Windows launches two PowerShell processes sequentially here; loaded CI
+	// runners can take more than five seconds even though both hooks succeed.
+	waitForFiles(t, 15*time.Second, globalMarker, repoMarker)
 }
 
 func TestHookRunnerRepoOnlyHooks(t *testing.T) {
