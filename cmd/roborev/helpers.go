@@ -5,11 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"strings"
 
 	"github.com/spf13/cobra"
 	gitrepo "go.kenn.io/kit/git/repo"
 
+	"go.kenn.io/roborev/internal/git"
 	"go.kenn.io/roborev/internal/githook"
 	"go.kenn.io/roborev/internal/storage"
 )
@@ -88,15 +88,7 @@ func quietExit(cmd *cobra.Command, err error) error {
 }
 
 func shortRef(ref string) string {
-	// For ranges like "abc123..def456", show as "abc123..def456" (up to 17 chars)
-	// For single SHAs, truncate to 7 chars
-	if strings.Contains(ref, "..") {
-		if len(ref) > 17 {
-			return ref[:17]
-		}
-		return ref
-	}
-	return gitrepo.ShortSHA(ref)
+	return git.ShortRef(ref)
 }
 
 // shortJobRef returns a display-friendly ref for a job, handling special job types.
