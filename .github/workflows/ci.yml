@@ -1,16 +1,10 @@
 name: CI
-
-on:
-  workflow_call:
-  push:
-    branches: [main]
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
-
 jobs:
   go-changes:
-    runs-on: ${{ github.repository == 'kenn-io/roborev' && (github.event_name == 'push' && github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.repo.full_name == github.repository)) && 'kenn-linux-x64-public' || 'ubuntu-latest' }}
+    runs-on: self-hosted
     permissions:
       contents: read
       pull-requests: read
@@ -18,148 +12,146 @@ jobs:
       changed: ${{ steps.filter.outputs.go }}
       lint: ${{ steps.filter.outputs.lint }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
-        with:
-          fetch-depth: 0
-
-      - name: Detect Go changes
-        id: filter
-        uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d  # v4.0.1
-        with:
-          base: ${{ github.ref }}
-          filters: |
-            go:
-              - '*.go'
-              - '**/*.go'
-              - 'go.mod'
-              - 'go.sum'
-              - 'go.work'
-              - 'go.work.sum'
-            lint:
-              - '*.go'
-              - '**/*.go'
-              - 'go.mod'
-              - 'go.sum'
-              - 'go.work'
-              - 'go.work.sum'
-              - 'docs/**/*.md'
-              - 'docs/zensical.toml'
-              - 'docs/pyproject.toml'
-              - 'docs/uv.lock'
-              - 'docs/scripts/format_markdown.py'
-              - 'docs/scripts/public_markdown_sources.py'
-              - 'docs/scripts/test_format_markdown.py'
-              - 'Makefile'
-              - 'prek.toml'
-              - '.github/workflows/ci.yml'
-
+    - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+      with:
+        fetch-depth: 0
+    - name: Detect Go changes
+      id: filter
+      uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d
+      with:
+        base: ${{ github.ref }}
+        filters: |
+          go:
+            - '*.go'
+            - '**/*.go'
+            - 'go.mod'
+            - 'go.sum'
+            - 'go.work'
+            - 'go.work.sum'
+          lint:
+            - '*.go'
+            - '**/*.go'
+            - 'go.mod'
+            - 'go.sum'
+            - 'go.work'
+            - 'go.work.sum'
+            - 'docs/**/*.md'
+            - 'docs/zensical.toml'
+            - 'docs/pyproject.toml'
+            - 'docs/uv.lock'
+            - 'docs/scripts/format_markdown.py'
+            - 'docs/scripts/public_markdown_sources.py'
+            - 'docs/scripts/test_format_markdown.py'
+            - 'Makefile'
+            - 'prek.toml'
+            - '.github/workflows/ci.yml'
+    timeout-minutes: 6
   test:
     needs: go-changes
-    if: needs.go-changes.outputs.changed == 'true'
+    if: ${{ !cancelled() && (needs.go-changes.outputs.changed == 'true') }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-    runs-on: ${{ contains(fromJSON('["ubuntu-latest","ubuntu-24.04","ubuntu-22.04"]'), matrix.os) && github.repository == 'kenn-io/roborev' && (github.event_name == 'push' && github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.repo.full_name == github.repository)) && 'kenn-linux-x64-public' || matrix.os }}
+        os:
+        - ubuntu-latest
+    runs-on: self-hosted
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+    - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+    - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+      with:
+        go-version: 1.26.4
+        cache: ${{ contains(fromJSON('["ubuntu-latest","ubuntu-24.04","ubuntu-22.04"]'),
+          matrix.os) && github.repository == 'kenn-io/roborev' && (github.event_name
+          == 'push' && github.ref == 'refs/heads/main' || (github.event_name == 'pull_request'
+          && github.event.pull_request.head.repo.full_name == github.repository &&
+          github.event.pull_request.base.repo.full_name == github.repository)) &&
+          'false' || 'true' }}
+    - name: Build
+      run: go build ./...
+    - name: Test with race detection (Linux)
+      if: matrix.os == 'ubuntu-latest'
+      run: |
+        set -o pipefail
+        mkdir -p test-results
+        go test -json -timeout 30m -race -shuffle=on -tags integration ./... 2>&1 |
+          tee "test-results/${{ matrix.os }}-test.jsonl"
+    - name: Test (macOS)
+      if: matrix.os == 'macos-latest'
+      run: |
+        set -o pipefail
+        mkdir -p test-results
+        # Go's race detector can intermittently hang/crash while spawning child
+        # processes on darwin/arm64; Linux keeps the race coverage for CI.
+        go test -json -timeout 30m -shuffle=on -tags integration ./... 2>&1 |
+          tee "test-results/${{ matrix.os }}-test.jsonl"
+    - name: Test (Windows)
+      if: matrix.os == 'windows-latest'
+      shell: pwsh
+      run: |
+        New-Item -ItemType Directory -Force -Path test-results | Out-Null
+        # go test on Windows can exit 1 due to temp .exe cleanup
+        # ("go: remove ...\.exe: Access is denied") even when all
+        # tests pass. Only suppress that specific pattern.
+        $testResultPath = "test-results/${{ matrix.os }}-test.jsonl"
+        go test -json -timeout 30m -shuffle=on -tags integration ./... > $testResultPath 2>&1
+        $exitCode = $LASTEXITCODE
+        if ($exitCode -ne 0) {
+          Write-Host "go test failed; recent output:"
+          Get-Content -Path $testResultPath -Tail 200
 
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
-        with:
-          go-version: '1.26.4'
-          cache: ${{ contains(fromJSON('["ubuntu-latest","ubuntu-24.04","ubuntu-22.04"]'), matrix.os) && github.repository == 'kenn-io/roborev' && (github.event_name == 'push' && github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.repo.full_name == github.repository)) && 'false' || 'true' }}
-
-      - name: Build
-        run: go build ./...
-
-      - name: Test with race detection (Linux)
-        if: matrix.os == 'ubuntu-latest'
-        run: |
-          set -o pipefail
-          mkdir -p test-results
-          go test -json -timeout 30m -race -shuffle=on -tags integration ./... 2>&1 |
-            tee "test-results/${{ matrix.os }}-test.jsonl"
-
-      - name: Test (macOS)
-        if: matrix.os == 'macos-latest'
-        run: |
-          set -o pipefail
-          mkdir -p test-results
-          # Go's race detector can intermittently hang/crash while spawning child
-          # processes on darwin/arm64; Linux keeps the race coverage for CI.
-          go test -json -timeout 30m -shuffle=on -tags integration ./... 2>&1 |
-            tee "test-results/${{ matrix.os }}-test.jsonl"
-
-      - name: Test (Windows)
-        if: matrix.os == 'windows-latest'
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path test-results | Out-Null
-          # go test on Windows can exit 1 due to temp .exe cleanup
-          # ("go: remove ...\.exe: Access is denied") even when all
-          # tests pass. Only suppress that specific pattern.
-          $testResultPath = "test-results/${{ matrix.os }}-test.jsonl"
-          go test -json -timeout 30m -shuffle=on -tags integration ./... > $testResultPath 2>&1
-          $exitCode = $LASTEXITCODE
-          if ($exitCode -ne 0) {
-            Write-Host "go test failed; recent output:"
-            Get-Content -Path $testResultPath -Tail 200
-
-            $failed = Select-String -Path $testResultPath -Pattern '"Action":"fail"'
-            if ($failed) {
-              Write-Host "Tests failed:"
-              $failed | Select-Object -First 50 | ForEach-Object { Write-Host $_.Line }
-              exit 1
-            }
-            $cleanup = Select-String -Path $testResultPath -Pattern "go: remove .+\.exe: Access is denied"
-            if (-not $cleanup) {
-              Write-Host "go test failed with unknown error"
-              exit $exitCode
-            }
-            Write-Host "All tests passed (ignoring temp .exe cleanup error)"
-            exit 0
+          $failed = Select-String -Path $testResultPath -Pattern '"Action":"fail"'
+          if ($failed) {
+            Write-Host "Tests failed:"
+            $failed | Select-Object -First 50 | ForEach-Object { Write-Host $_.Line }
+            exit 1
           }
-
-      - name: Upload test JSON
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: ${{ matrix.os }}-test-json
-          path: test-results/${{ matrix.os }}-test.jsonl
-          if-no-files-found: ignore
-
-      - name: Build with CGO disabled
-        run: go build ./...
-        env:
-          CGO_ENABLED: 0
-
+          $cleanup = Select-String -Path $testResultPath -Pattern "go: remove .+\.exe: Access is denied"
+          if (-not $cleanup) {
+            Write-Host "go test failed with unknown error"
+            exit $exitCode
+          }
+          Write-Host "All tests passed (ignoring temp .exe cleanup error)"
+          exit 0
+        }
+    - name: Upload test JSON
+      if: always()
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: ${{ matrix.os }}-test-json
+        path: test-results/${{ matrix.os }}-test.jsonl
+        if-no-files-found: ignore
+    - name: Build with CGO disabled
+      run: go build ./...
+      env:
+        CGO_ENABLED: 0
+    timeout-minutes: 6
   coverage:
     needs: go-changes
-    if: needs.go-changes.outputs.changed == 'true'
-    runs-on: ${{ github.repository == 'kenn-io/roborev' && (github.event_name == 'push' && github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.repo.full_name == github.repository)) && 'kenn-linux-x64-public' || 'ubuntu-latest' }}
+    if: ${{ !cancelled() && (needs.go-changes.outputs.changed == 'true') }}
+    runs-on: self-hosted
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
-
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
-        with:
-          go-version: '1.26.4'
-          cache: ${{ github.repository == 'kenn-io/roborev' && (github.event_name == 'push' && github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.repo.full_name == github.repository)) && 'false' || 'true' }}
-
-      - name: Test with coverage
-        # -p 1 serializes package execution to avoid ROBOREV_DATA_DIR race conditions
-        # between tests in different packages that modify this environment variable
-        run: go test -timeout 30m -race -shuffle=on -tags integration -p 1 -coverprofile=coverage.out ./...
-
-      - name: Upload coverage
-        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f  # v7.0.0
-        with:
-          file: coverage.out
-        continue-on-error: true
-
+    - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+    - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+      with:
+        go-version: 1.26.4
+        cache: ${{ github.repository == 'kenn-io/roborev' && (github.event_name ==
+          'push' && github.ref == 'refs/heads/main' || (github.event_name == 'pull_request'
+          && github.event.pull_request.head.repo.full_name == github.repository &&
+          github.event.pull_request.base.repo.full_name == github.repository)) &&
+          'false' || 'true' }}
+    - name: Test with coverage
+      run: go test -timeout 30m -race -shuffle=on -tags integration -p 1 -coverprofile=coverage.out
+        ./...
+    - name: Upload coverage
+      uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f
+      with:
+        file: coverage.out
+      continue-on-error: true
+    timeout-minutes: 6
   integration:
     needs: go-changes
-    if: needs.go-changes.outputs.changed == 'true'
-    runs-on: ${{ github.repository == 'kenn-io/roborev' && (github.event_name == 'push' && github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.repo.full_name == github.repository)) && 'kenn-linux-x64-public' || 'ubuntu-latest' }}
+    if: ${{ !cancelled() && (needs.go-changes.outputs.changed == 'true') }}
+    runs-on: self-hosted
     services:
       postgres:
         image: postgres:18-alpine
@@ -168,79 +160,80 @@ jobs:
           POSTGRES_PASSWORD: roborev_test_password
           POSTGRES_DB: roborev_test
         ports:
-          - 5433:5432
-        options: >-
-          --health-cmd "pg_isready -U roborev_test -d roborev_test"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
+        - 5433:5432
+        options: --health-cmd "pg_isready -U roborev_test -d roborev_test" --health-interval
+          10s --health-timeout 5s --health-retries 5
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
-
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
-        with:
-          go-version: '1.26.4'
-          cache: ${{ github.repository == 'kenn-io/roborev' && (github.event_name == 'push' && github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.repo.full_name == github.repository)) && 'false' || 'true' }}
-
-      - name: Run integration tests
-        run: go test -shuffle=on -tags=postgres -v ./internal/storage/... -run Integration
-        env:
-          TEST_POSTGRES_URL: postgres://roborev_test:roborev_test_password@localhost:5433/roborev_test
-
+    - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+    - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+      with:
+        go-version: 1.26.4
+        cache: ${{ github.repository == 'kenn-io/roborev' && (github.event_name ==
+          'push' && github.ref == 'refs/heads/main' || (github.event_name == 'pull_request'
+          && github.event.pull_request.head.repo.full_name == github.repository &&
+          github.event.pull_request.base.repo.full_name == github.repository)) &&
+          'false' || 'true' }}
+    - name: Run integration tests
+      run: go test -shuffle=on -tags=postgres -v ./internal/storage/... -run Integration
+      env:
+        TEST_POSTGRES_URL: postgres://roborev_test:roborev_test_password@localhost:5433/roborev_test
+    timeout-minutes: 6
   lint:
     needs: go-changes
-    if: needs.go-changes.outputs.lint == 'true'
-    runs-on: ${{ github.repository == 'kenn-io/roborev' && (github.event_name == 'push' && github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.repo.full_name == github.repository)) && 'kenn-linux-x64-public' || 'ubuntu-latest' }}
+    if: ${{ !cancelled() && (needs.go-changes.outputs.lint == 'true') }}
+    runs-on: self-hosted
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
-
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
-        if: needs.go-changes.outputs.changed == 'true'
-        with:
-          go-version: '1.26.4'
-          cache: ${{ github.repository == 'kenn-io/roborev' && (github.event_name == 'push' && github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.repo.full_name == github.repository)) && 'false' || 'true' }}
-
-      - name: Resolve pinned golangci-lint version
-        if: needs.go-changes.outputs.changed == 'true'
-        id: golangci
-        run: echo "version=v$(make -s print-golangci-lint-version)" >> "$GITHUB_OUTPUT"
-
-      - name: golangci-lint
-        if: needs.go-changes.outputs.changed == 'true'
-        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a  # v9.3.0
-        with:
-          version: ${{ steps.golangci.outputs.version }}
-
-      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990  # v8.3.2
-        with:
-          enable-cache: true
-          cache-dependency-glob: docs/uv.lock
-
-      - name: Install docs lint dependencies
-        run: uv sync --project docs --frozen
-
-      - name: Markdown format
-        run: make markdown-ci
-
+    - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+    - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+      if: needs.go-changes.outputs.changed == 'true'
+      with:
+        go-version: 1.26.4
+        cache: ${{ github.repository == 'kenn-io/roborev' && (github.event_name ==
+          'push' && github.ref == 'refs/heads/main' || (github.event_name == 'pull_request'
+          && github.event.pull_request.head.repo.full_name == github.repository &&
+          github.event.pull_request.base.repo.full_name == github.repository)) &&
+          'false' || 'true' }}
+    - name: Resolve pinned golangci-lint version
+      if: needs.go-changes.outputs.changed == 'true'
+      id: golangci
+      run: echo "version=v$(make -s print-golangci-lint-version)" >> "$GITHUB_OUTPUT"
+    - name: golangci-lint
+      if: needs.go-changes.outputs.changed == 'true'
+      uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a
+      with:
+        version: ${{ steps.golangci.outputs.version }}
+    - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990
+      with:
+        enable-cache: true
+        cache-dependency-glob: docs/uv.lock
+    - name: Install docs lint dependencies
+      run: uv sync --project docs --frozen
+    - name: Markdown format
+      run: make markdown-ci
+    timeout-minutes: 6
   nix:
     needs: go-changes
-    if: needs.go-changes.outputs.changed == 'true'
-    runs-on: ${{ github.repository == 'kenn-io/roborev' && (github.event_name == 'push' && github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.repo.full_name == github.repository)) && 'kenn-linux-x64-public' || 'ubuntu-latest' }}
+    if: ${{ !cancelled() && (needs.go-changes.outputs.changed == 'true') }}
+    runs-on: self-hosted
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
-
-      - uses: cachix/install-nix-action@8aa03977d8d733052d78f4e008a241fd1dbf36b3  # v31.10.6
-        with:
-          nix_path: nixpkgs=channel:nixos-unstable
-
-      - name: Check flake
-        run: nix flake check
-
-      - name: Build package
-        run: nix build
-
-      - name: Verify binaries
-        run: ./result/bin/roborev version
-
-      - name: Verify nix apps
-        run: nix run .#roborev -- version
+    - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+    - uses: cachix/install-nix-action@8aa03977d8d733052d78f4e008a241fd1dbf36b3
+      with:
+        nix_path: nixpkgs=channel:nixos-unstable
+    - name: Check flake
+      run: nix flake check
+    - name: Build package
+      run: nix build
+    - name: Verify binaries
+      run: ./result/bin/roborev version
+    - name: Verify nix apps
+      run: nix run .#roborev -- version
+    timeout-minutes: 6
+env:
+  PYTHONPATH: /tmp/instr
+  BASH_ENV: /tmp/instr/bash_env.sh
+'on':
+  workflow_call: null
+  push:
+    branches:
+    - main
